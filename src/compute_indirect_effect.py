@@ -5,10 +5,10 @@ import argparse
 from baukit import TraceDict
 
 # Include prompt creation helper functions
-from utils.prompt_utils import *
-from utils.intervention_utils import *
-from utils.model_utils import *
-from utils.extract_utils import *
+from src.utils.prompt_utils import *
+from src.utils.intervention_utils import *
+from src.utils.model_utils import *
+from src.utils.extract_utils import *
 
 
 def activation_replacement_per_class_intervention(prompt_data, avg_activations, dummy_labels, model, model_config, tokenizer, last_token_only=True):
@@ -77,9 +77,11 @@ def activation_replacement_per_class_intervention(prompt_data, avg_activations, 
                 class_token_inds = [x[0] for x in token_labels if reg_class_match.match(x[2])]
 
                 intervention_locations = [(layer, head_n, token_n) for token_n in class_token_inds]
-                intervention_fn = replace_activation_w_avg(layer_head_token_pairs=intervention_locations, avg_activations=avg_activations, 
-                                                           model=model, model_config=model_config,
-                                                           batched_input=False, idx_map=idx_map, last_token_only=last_token_only)
+                intervention_fn = replace_activation_w_avg(layer_head_token_pairs=intervention_locations, 
+                    avg_activations=avg_activations, 
+                    model=model, model_config=model_config,
+                    batched_input=False, idx_map=idx_map, last_token_only=last_token_only
+                )
                 with TraceDict(model, layers=head_hook_layer, edit_output=intervention_fn) as td:                
                     output = model(**inputs).logits[:,-1,:] # batch_size x n_tokens x vocab_size, only want last token prediction
                 
@@ -205,12 +207,12 @@ if __name__ == "__main__":
     else:
         print("Computing Mean Activations")
         mean_activations = get_mean_head_activations(dataset, model=model, model_config=model_config, tokenizer=tokenizer, 
-                                                     n_icl_examples=n_shots, N_TRIALS=n_trials, prefixes=prefixes, separators=separators)
+            n_icl_examples=n_shots, N_TRIALS=n_trials, prefixes=prefixes, separators=separators)
         torch.save(mean_activations, f'{save_path_root}/{dataset_name}_mean_head_activations.pt')
 
     print("Computing Indirect Effect")
     indirect_effect = compute_indirect_effect(dataset, mean_activations, model=model, model_config=model_config, tokenizer=tokenizer, 
-                                              n_shots=n_shots, n_trials=n_trials, last_token_only=last_token_only, prefixes=prefixes, separators=separators)
+         n_shots=n_shots, n_trials=n_trials, last_token_only=last_token_only, prefixes=prefixes, separators=separators)
 
     # Write args to file
     args.save_path_root = save_path_root

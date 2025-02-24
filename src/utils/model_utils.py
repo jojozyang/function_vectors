@@ -23,8 +23,20 @@ def load_gpt_model_and_tokenizer(model_name:str, device='cuda'):
     assert model_name is not None
 
     print("Loading: ", model_name)
+    if model_name == 'gpt2-medium':
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer.pad_token = tokenizer.eos_token
+        model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
 
-    if model_name == 'gpt2-xl':
+        MODEL_CONFIG={"n_heads":model.config.n_head,
+                      "n_layers":model.config.n_layer,
+                      "resid_dim":model.config.n_embd,
+                      "name_or_path":model.config.name_or_path,
+                      "attn_hook_names":[f'transformer.h.{layer}.attn.c_proj' for layer in range(model.config.n_layer)],
+                      "layer_hook_names":[f'transformer.h.{layer}' for layer in range(model.config.n_layer)],
+                      "prepend_bos":False}
+
+    elif model_name == 'gpt2-xl':
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         tokenizer.pad_token = tokenizer.eos_token
         model = AutoModelForCausalLM.from_pretrained(model_name).to(device)

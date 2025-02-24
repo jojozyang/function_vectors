@@ -342,7 +342,7 @@ def compute_function_vector(mean_activations, indirect_effect, model, model_conf
     T = -1 # Intervention & values taken from last token
 
     for L,H,_ in top_heads:
-        if 'gpt2-xl' in model_config['name_or_path']:
+        if 'gpt2-xl' in model_config['name_or_path'] or 'gpt2-medium' in model_config['name_or_path']:
             out_proj = model.transformer.h[L].attn.c_proj
         elif 'gpt-j' in model_config['name_or_path']:
             out_proj = model.transformer.h[L].attn.out_proj
@@ -458,7 +458,7 @@ def compute_universal_function_vector(mean_activations, model, model_config, n_t
     T = -1 # Intervention & values taken from last token
 
     for L,H,_ in top_heads:
-        if 'gpt2-xl' in model_config['name_or_path']:
+        if 'gpt2-xl' in model_config['name_or_path'] or 'gpt2-medium' in model_config['name_or_path']:
             out_proj = model.transformer.h[L].attn.c_proj
         elif 'gpt-j' in model_config['name_or_path']:
             out_proj = model.transformer.h[L].attn.out_proj
@@ -469,7 +469,7 @@ def compute_universal_function_vector(mean_activations, model, model_config, n_t
 
         x = torch.zeros(model_resid_dim)
         x[H*model_head_dim:(H+1)*model_head_dim] = mean_activations[L,H,T]
-        d_out = out_proj(x.reshape(1,1,model_resid_dim).to(device).to(model.dtype))
+        d_out = out_proj(x.reshape(1,1,model_resid_dim).to(device).to(model.dtype)) # project from head dim to resid dim
 
         function_vector += d_out
         function_vector = function_vector.to(model.dtype)
