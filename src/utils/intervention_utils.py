@@ -103,15 +103,15 @@ def patch_function_vector_attn_out(edit_layer, fv_vector, device, idx=-1):
     idx: the token index to add the function vector at
 
     Returns:
-    add_act: a fuction specifying how to replace a layer's attn output with a function vector  
+    patch_act: a fuction specifying how to replace a layer's attn output with a function vector  
     """
     def patch_act(output, layer_name):
         current_layer = int(layer_name.split(".")[2])
         if current_layer == edit_layer:
             if isinstance(output, tuple):
-                output[0][:, idx] = fv_vector.to(device)
                 return output
             else:
+                output[:, idx] = fv_vector.to(device)
                 return output
         else:
             return output
