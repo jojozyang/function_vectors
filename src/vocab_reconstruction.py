@@ -80,7 +80,8 @@ def vocab_reconstruction(datasets, n_steps:int=1000, lr:float=0.5, n_seeds:int=5
             filter_set = np.where(np.array(fs_results['clean_rank_list']) == 0)[0]
             
             fv_results = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=9, n_shots=0,
-                                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set)
+                model=model, model_config=model_config, tokenizer=tokenizer, 
+                filter_set=filter_set, fv_intervention=fv_intervention)
             
             orig_results[dataset_name].append(fv_results)
             fvs[dataset_name].append(fv)
@@ -106,8 +107,10 @@ def vocab_reconstruction(datasets, n_steps:int=1000, lr:float=0.5, n_seeds:int=5
                 
                 scaled_vn = computed_vn / torch.linalg.norm(computed_vn) * torch.linalg.norm(fv)
 
-                zs_reconstruction_results = n_shot_eval(dataset=dataset, fv_vector=scaled_vn, edit_layer=9, n_shots=0,
-                                        model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set)
+                zs_reconstruction_results = n_shot_eval(dataset=dataset, fv_vector=scaled_vn, 
+                    edit_layer=9, n_shots=0,
+                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                    filter_set=filter_set, fv_intervention=fv_intervention)
                 
                 zs_results[dataset_name][j].append(zs_reconstruction_results)
                 vns[dataset_name][j].append(scaled_vn.detach())

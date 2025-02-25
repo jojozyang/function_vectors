@@ -49,7 +49,8 @@ if __name__ == "__main__":
 
     for i in range(n_heads+1):   
         fv, _ = compute_universal_function_vector(mean_activations, model, model_config, i)
-        zs_results[i] = n_shot_eval(dataset, fv, edit_layer, 0, model, model_config, tokenizer, filter_set=filter_set)
+        zs_results[i] = n_shot_eval(dataset, fv, edit_layer, 0, model, model_config, 
+            tokenizer, filter_set=filter_set, fv_intervention=fv_intervention)
     
     
     os.makedirs(f'{save_path_root}/{model_nickname}_test_numheads', exist_ok=True)

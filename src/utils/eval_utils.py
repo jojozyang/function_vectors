@@ -207,7 +207,7 @@ def sentence_eval(sentence, target, model, tokenizer, compute_nll=True, generate
 
 def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_config, tokenizer, shuffle_labels:bool=False,
                 filter_set=None, prefixes=None, separators=None, generate_str=False, pred_filepath=None,
-                metric="f1_score"):
+                metric="f1_score", fv_intervention='resid'):
     """
     Evaluate a model and FV intervention on the model using the provided ICL dataset.
 
@@ -226,6 +226,7 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
     generate_str: whether to generate a string of tokens or predict a single token
     pred_filepath: filepath to save intermediate generations for debugging
     metric: metric to use for longer generations (F1, exact match, etc.)
+    fv_intervention: how to integrate fv (resid: add to the residual stream; attn_out: patch to replace attn outputs)
 
     Returns:
     results: dict of topk accuracy on the test dataset, for both the model's n-shot, and n-shot + FV intervention, as well as the token rank of each prediction
@@ -287,9 +288,9 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
             else:
                 raise ValueError(f"Unknown metric: {metric}. Recognized metrics: [\"f1_score\", \"exact_match_score\"]")
             clean_output, intervention_output = function_vector_intervention(sentence, target = target, edit_layer = edit_layer, 
-                                                                            function_vector = fv_vector,
-                                                                            model=model, model_config=model_config, tokenizer=tokenizer, 
-                                                                            compute_nll=False, generate_str=generate_str)
+                function_vector = fv_vector,
+                model=model, model_config=model_config, tokenizer=tokenizer, 
+                compute_nll=False, generate_str=generate_str, fv_intervention=fv_intervention)
             clean_parsed_str, clean_score = parse_generation(clean_output, target, metric_fn)
             intervention_parsed_str, intervention_score = parse_generation(intervention_output, target, metric_fn)
             
@@ -301,11 +302,11 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
 
         else:
             clean_output, intervention_output = function_vector_intervention(sentence, target = [target], edit_layer = edit_layer, 
-                                                                              function_vector = fv_vector,
-                                                                              model=model, model_config=model_config, tokenizer=tokenizer, 
-                                                                              compute_nll=False) 
+                function_vector = fv_vector,
+                model=model, model_config=model_config, tokenizer=tokenizer, 
+                compute_nll=False, fv_intervention=fv_intervention,
+            ) 
         
-
             clean_rank = compute_individual_token_rank(clean_output, target_token_id)
             intervention_rank = compute_individual_token_rank(intervention_output, target_token_id)
             
@@ -585,9 +586,13 @@ def portability_eval(dataset, fv_vector, edit_layer:int, model, model_config, to
         fs_res_dict[i] = fs_results
 
         # ZS Eval
-        zs_res_dict[i] = n_shot_eval(dataset, fv_vector, edit_layer, 0, model, model_config, tokenizer, filter_set=filter_set, prefixes=p, separators=s)
+        zs_res_dict[i] = n_shot_eval(dataset, fv_vector, edit_layer, 0, model, 
+            model_config, tokenizer, filter_set=filter_set, prefixes=p, 
+            separators=s, fv_intervention=fv_intervention)
 
         # ZS Eval
-        fs_shuffled_res_dict[i] = n_shot_eval(dataset, fv_vector, edit_layer, 10, model, model_config, tokenizer, filter_set=filter_set, prefixes=p, separators=s, shuffle_labels=True)
+        fs_shuffled_res_dict[i] = n_shot_eval(dataset, fv_vector, edit_layer, 10, model,
+            model_config, tokenizer, filter_set=filter_set, prefixes=p,
+            separators=s, shuffle_labels=True, fv_intervention=fv_intervention)
     
     return fs_res_dict, zs_res_dict,fs_shuffled_res_dict,  templates

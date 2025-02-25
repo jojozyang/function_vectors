@@ -79,8 +79,11 @@ if __name__ == "__main__":
         zs_res = {}
         fss_res = {}
         for i in range(model_config['n_layers']):
-            zs_res[i] = n_shot_eval(dataset, mean_activations[i].unsqueeze(0), i, 0, model, model_config, tokenizer, filter_set=filter_set)
-            fss_res[i] = n_shot_eval(dataset, mean_activations[i].unsqueeze(0), i, 10, model, model_config, tokenizer, filter_set=filter_set, shuffle_labels=True)
+            zs_res[i] = n_shot_eval(dataset, mean_activations[i].unsqueeze(0), i, 0, model, 
+                model_config, tokenizer, filter_set=filter_set, fv_intervention=fv_intervention)
+            fss_res[i] = n_shot_eval(dataset, mean_activations[i].unsqueeze(0), i, 10, model, 
+                model_config, tokenizer, filter_set=filter_set, shuffle_labels=True,
+                fv_intervention=fv_intervention)
 
         with open(f'{save_path_root}/mean_layer_intervention_zs_results_sweep_{seed}.json', 'w') as interv_zsres_file:
             json.dump(zs_res, interv_zsres_file, indent=2)

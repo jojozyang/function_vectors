@@ -92,6 +92,32 @@ def replace_activation_w_avg(layer_head_token_pairs, avg_activations, model, mod
 
     return rep_act
 
+def patch_function_vector_attn_out(edit_layer, fv_vector, device, idx=-1):
+    """
+    Pacth fv to replace the attntion output of a specific layer 
+
+    Parameters:
+    edit_layer: the layer to perform the FV intervention
+    fv_vector: the function vector to add as an intervention, '1 d_model'
+    device: device of the model (cuda gpu or cpu)
+    idx: the token index to add the function vector at
+
+    Returns:
+    add_act: a fuction specifying how to replace a layer's attn output with a function vector  
+    """
+    def patch_act(output, layer_name):
+        current_layer = int(layer_name.split(".")[2])
+        if current_layer == edit_layer:
+            if isinstance(output, tuple):
+                output[0][:, idx] = fv_vector.to(device)
+                return output
+            else:
+                return output
+        else:
+            return output
+
+    return patch_act
+
 def add_function_vector(edit_layer, fv_vector, device, idx=-1):
     """
     Adds a vector to the output of a specified layer in the model
@@ -118,8 +144,10 @@ def add_function_vector(edit_layer, fv_vector, device, idx=-1):
 
     return add_act
 
-def function_vector_intervention(sentence, target, edit_layer, function_vector, model, model_config, tokenizer, compute_nll=False,
-                                  generate_str=False):
+def function_vector_intervention(sentence, target, edit_layer, function_vector, 
+    model, model_config, tokenizer, compute_nll=False, generate_str=False,
+    fv_intervention='resid',
+):
     """
     Runs the model on the sentence and adds the function_vector to the output of edit_layer as a model intervention, predicting a single token.
     Returns the output of the model with and without intervention.
@@ -134,6 +162,7 @@ def function_vector_intervention(sentence, target, edit_layer, function_vector, 
     tokenizer: huggingface tokenizer
     compute_nll: whether to compute the negative log likelihood of a teacher-forced completion (used to compute perplexity (PPL))
     generate_str: whether to generate a string of tokens or predict a single token
+    fv_intervention: how to integrate fv (resid: add to the residual stream; attn_out: patch to replace attn outputs)
 
     Returns:
     fvi_output: a tuple containing output results of a clean run and intervened run of the model
@@ -164,8 +193,21 @@ def function_vector_intervention(sentence, target, edit_layer, function_vector, 
         intervention_idx = -1
 
     # Perform Intervention
-    intervention_fn = add_function_vector(edit_layer, function_vector.reshape(1, model_config['resid_dim']), model.device, idx=intervention_idx)
-    with TraceDict(model, layers=model_config['layer_hook_names'], edit_output=intervention_fn):     
+    ## get fuction that specifies how to add a function vector to a layer's output hidden state
+    if fv_intervention == "resid": 
+        intervention_fn = add_function_vector(edit_layer, 
+            function_vector.reshape(1, model_config['resid_dim']), 
+            model.device, idx=intervention_idx
+        )
+        intervention_layers = model_config['layer_hook_names']
+    elif fv_intervention == "attn_out":
+        intervention_fn = patch_function_vector_attn_out(edit_layer, 
+            function_vector.reshape(1, model_config['resid_dim']), 
+            model.device, idx=intervention_idx
+        )
+        intervention_layers = model_config['attn_hook_names']
+
+    with TraceDict(model, layers=intervention_layers, edit_output=intervention_fn):     
         if compute_nll:
             output = model(**nll_inputs, labels=nll_targets)
             intervention_nll = output.loss.item()

@@ -34,6 +34,7 @@ if __name__ == "__main__":
     parser.add_argument('--generate_str', help='Whether to generate long-form completions for the task', action='store_true', required=False)
     parser.add_argument("--metric", help="Metric to use when evaluating generated strings", type=str, required=False, default="f1_score")
     parser.add_argument("--universal_set", help="Flag for whether to evaluate using the univeral set of heads", action="store_true", required=False)
+    parser.add_argument("--fv_intervention", help="To add Fv to residual stream (resid) or replace attn outputs (attn_out)", type=str, required=True)
         
     args = parser.parse_args()  
 
@@ -60,7 +61,9 @@ if __name__ == "__main__":
     generate_str = args.generate_str
     metric = args.metric
     universal_set = args.universal_set
+    fv_intervention = args.fv_intervention
 
+    print(universal_set)
     print(args)
 
     # Load Model & Tokenizer
@@ -158,25 +161,36 @@ if __name__ == "__main__":
         if generate_str:
             pred_filepath = f"{save_path_root}/preds/{model_config['name_or_path'].replace('/', '_')}_ZS_intervention_layer{eval_edit_layer}.txt"
             zs_results = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=eval_edit_layer, n_shots=0,
-                                     model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
-                                     generate_str=generate_str, metric=metric, pred_filepath=pred_filepath, prefixes=prefixes, separators=separators)
+                model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
+                generate_str=generate_str, metric=metric, pred_filepath=pred_filepath, 
+                prefixes=prefixes, separators=separators, fv_intervention=fv_intervention)
         else:
             zs_results = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=eval_edit_layer, n_shots=0,
-                                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set, prefixes=prefixes, separators=separators)
-        zs_results_file_suffix = f'_editlayer_{eval_edit_layer}.json'   
-
+                model=model, model_config=model_config, tokenizer=tokenizer, 
+                filter_set=filter_set, prefixes=prefixes, separators=separators,
+                fv_intervention=fv_intervention)
+        if fv_intervention == 'resid':
+            zs_results_file_suffix = f'_editlayer_{eval_edit_layer}.json'  
+        elif fv_intervention == 'attn_out':
+            zs_results_file_suffix = f'_editlayer_{eval_edit_layer}_attn_out.json'  
 
         print(f"Running {n_shots}-Shot Shuffled Eval")
         set_seed(seed)
         if generate_str:
             pred_filepath = f"{save_path_root}/preds/{model_config['name_or_path'].replace('/', '_')}_{n_shots}shots_shuffled_intervention_layer{eval_edit_layer}.txt"
             fs_shuffled_results = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=eval_edit_layer, n_shots=n_shots, 
-                                              model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set, shuffle_labels=True,
-                                              generate_str=generate_str, metric=metric, pred_filepath=pred_filepath, prefixes=prefixes, separators=separators)
+                model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set, 
+                shuffle_labels=True, generate_str=generate_str, metric=metric, 
+                pred_filepath=pred_filepath, prefixes=prefixes, separators=separators,
+                fv_intervention=fv_intervention)
         else:
             fs_shuffled_results = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=eval_edit_layer, n_shots=n_shots, 
                                               model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set, shuffle_labels=True, prefixes=prefixes, separators=separators)
-        fs_shuffled_results_file_suffix = f'_editlayer_{eval_edit_layer}.json'   
+        
+        if fv_intervention == 'resid':
+            fs_shuffled_results_file_suffix = f'_editlayer_{eval_edit_layer}.json'  
+        elif fv_intervention == 'attn_out':
+            fs_shuffled_results_file_suffix = f'_editlayer_{eval_edit_layer}_attn_out.json'  
         
     else:
         print(f"Running sweep over layers {eval_edit_layer}")
@@ -187,26 +201,34 @@ if __name__ == "__main__":
             # zero shot 
             if generate_str:
                 zs_results[edit_layer] = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=edit_layer, n_shots=0, 
-                                                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
-                                                    generate_str=generate_str, metric=metric, prefixes=prefixes, separators=separators)
+                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
+                    generate_str=generate_str, metric=metric, prefixes=prefixes, separators=separators,
+                    fv_intervention=fv_intervention)
             else:
                 zs_results[edit_layer] = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=edit_layer, n_shots=0, 
-                                                    prefixes=prefixes, separators=separators,
-                                                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set)
+                    prefixes=prefixes, separators=separators,
+                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
+                    fv_intervention=fv_intervention)
             set_seed(seed)
             # few shots with shuffled labels 
             if generate_str:
                 fs_shuffled_results[edit_layer] = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=edit_layer, n_shots=n_shots, 
-                                                    model=model, model_config=model_config, tokenizer=tokenizer, 
-                                                    filter_set = filter_set, generate_str=generate_str, metric=metric, 
-                                                    shuffle_labels=True, prefixes=prefixes, separators=separators)
+                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                    filter_set = filter_set, generate_str=generate_str, metric=metric, 
+                    shuffle_labels=True, prefixes=prefixes, separators=separators,
+                    fv_intervention=fv_intervention)
             else:
                 fs_shuffled_results[edit_layer] = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=edit_layer, n_shots=n_shots, 
-                                                    model=model, model_config=model_config, tokenizer=tokenizer, 
-                                                    filter_set = filter_set, shuffle_labels=True, prefixes=prefixes, separators=separators)
-        zs_results_file_suffix = '_layer_sweep.json'
-        fs_shuffled_results_file_suffix = '_layer_sweep.json'
-
+                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                    filter_set = filter_set, shuffle_labels=True, prefixes=prefixes, 
+                    separators=separators, fv_intervention=fv_intervention)
+        
+        if fv_intervention == 'resid':
+            zs_results_file_suffix = '_layer_sweep.json'
+            fs_shuffled_results_file_suffix = '_layer_sweep.json'
+        elif fv_intervention == 'attn_out':
+            zs_results_file_suffix = '_layer_sweep_attn_out.json'
+            fs_shuffled_results_file_suffix = '_layer_sweep_attn_out.json'
 
     # Save results to files
     zs_results_file_name = make_valid_path_name(f'{save_path_root}/zs_results' + zs_results_file_suffix)
