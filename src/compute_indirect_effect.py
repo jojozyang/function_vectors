@@ -5,10 +5,10 @@ import argparse
 from baukit import TraceDict
 
 # Include prompt creation helper functions
-from src.utils.prompt_utils import *
-from src.utils.intervention_utils import *
-from src.utils.model_utils import *
-from src.utils.extract_utils import *
+from utils.prompt_utils import *
+from utils.intervention_utils import *
+from utils.model_utils import *
+from utils.extract_utils import *
 
 
 def activation_replacement_per_class_intervention(prompt_data, avg_activations, dummy_labels, model, model_config, tokenizer, last_token_only=True):

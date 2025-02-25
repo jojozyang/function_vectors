@@ -405,7 +405,7 @@ def split_icl_dataset(dataset, train_size=None, test_size=0.3, seed=42) -> Dict[
 
 
 def load_dataset(task_name: str,
-                 root_data_dir: str = './dataset_files',
+                 root_data_dir: str = '../dataset_files',
                  test_size = 0.3, 
                  seed=32
                 ) -> Dict[str,ICLDataset]:

@@ -19,7 +19,7 @@ if __name__ == "__main__":
     parser.add_argument('--edit_layer', help='Layer for intervention. If -1, sweep over all layers', type=int, required=False, default=-1) # 
     parser.add_argument('--model_name', help='Name of model to be loaded', type=str, required=False, default='EleutherAI/gpt-j-6b')
     parser.add_argument('--root_data_dir', help='Root directory of data files', type=str, required=False, default='../dataset_files')
-    parser.add_argument('--save_path_root', help='File path to save to', type=str, required=False, default='../results')
+    parser.add_argument('--save_path_root', help='File path to save to', type=str, required=False, default='/oscar/data/epavlick/zyang220/results/fv_comm')
     parser.add_argument('--ie_path_root', help='File path to load indirect effects from', type=str, required=False, default=None)
     parser.add_argument('--seed', help='Randomized seed', type=int, required=False, default=42)
     parser.add_argument('--device', help='Device to run on',type=str, required=False, default='cuda' if torch.cuda.is_available() else 'cpu')
@@ -122,8 +122,9 @@ if __name__ == "__main__":
     else:
         print("Computing Mean Activations")
         set_seed(seed)
-        mean_activations = get_mean_head_activations(dataset, model=model, model_config=model_config, tokenizer=tokenizer, n_icl_examples=n_shots,
-                                                     N_TRIALS=n_trials, prefixes=prefixes, separators=separators, filter_set=filter_set_validation)
+        mean_activations = get_mean_head_activations(dataset, model=model, model_config=model_config, 
+            tokenizer=tokenizer, n_icl_examples=n_shots,
+            N_TRIALS=n_trials, prefixes=prefixes, separators=separators, filter_set=filter_set_validation)
         args.mean_activations_path = f'{save_path_root}/{dataset_name}_mean_head_activations.pt'
         torch.save(mean_activations, args.mean_activations_path)
 
@@ -136,16 +137,19 @@ if __name__ == "__main__":
     elif not universal_set:     # Only compute indirect effects if we need to
         print("Computing Indirect Effects")
         set_seed(seed)
-        indirect_effect = compute_indirect_effect(dataset, mean_activations, model=model, model_config=model_config, tokenizer=tokenizer, n_shots=n_shots,
-                                                  n_trials=n_trials, last_token_only=True, prefixes=prefixes, separators=separators, filter_set=filter_set_validation)
+        indirect_effect = compute_indirect_effect(dataset, mean_activations, model=model, 
+            model_config=model_config, tokenizer=tokenizer, n_shots=n_shots,
+            n_trials=n_trials, last_token_only=True, prefixes=prefixes, separators=separators, filter_set=filter_set_validation)
         args.indirect_effect_path = f'{save_path_root}/{dataset_name}_indirect_effect.pt'
         torch.save(indirect_effect, args.indirect_effect_path)
         
     # Compute Function Vector
     if universal_set:
-        fv, top_heads = compute_universal_function_vector(mean_activations, model, model_config=model_config, n_top_heads=n_top_heads)   
+        fv, top_heads = compute_universal_function_vector(mean_activations, model, 
+            model_config=model_config, n_top_heads=n_top_heads)   
     else:
-        fv, top_heads = compute_function_vector(mean_activations, indirect_effect, model, model_config=model_config, n_top_heads=n_top_heads)   
+        fv, top_heads = compute_function_vector(mean_activations, indirect_effect, model, 
+            model_config=model_config, n_top_heads=n_top_heads)   
     
     # Run Evaluation
     if isinstance(eval_edit_layer, int):
@@ -180,21 +184,26 @@ if __name__ == "__main__":
         fs_shuffled_results = {}
         for edit_layer in range(eval_edit_layer[0], eval_edit_layer[1]):
             set_seed(seed)
+            # zero shot 
             if generate_str:
                 zs_results[edit_layer] = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=edit_layer, n_shots=0, 
                                                     model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
                                                     generate_str=generate_str, metric=metric, prefixes=prefixes, separators=separators)
             else:
-                zs_results[edit_layer] = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=edit_layer, n_shots=0, prefixes=prefixes, separators=separators,
+                zs_results[edit_layer] = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=edit_layer, n_shots=0, 
+                                                    prefixes=prefixes, separators=separators,
                                                     model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set)
             set_seed(seed)
+            # few shots with shuffled labels 
             if generate_str:
                 fs_shuffled_results[edit_layer] = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=edit_layer, n_shots=n_shots, 
-                                                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set = filter_set,
-                                                    generate_str=generate_str, metric=metric, shuffle_labels=True, prefixes=prefixes, separators=separators)
+                                                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                                                    filter_set = filter_set, generate_str=generate_str, metric=metric, 
+                                                    shuffle_labels=True, prefixes=prefixes, separators=separators)
             else:
                 fs_shuffled_results[edit_layer] = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=edit_layer, n_shots=n_shots, 
-                                                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set = filter_set, shuffle_labels=True, prefixes=prefixes, separators=separators)
+                                                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                                                    filter_set = filter_set, shuffle_labels=True, prefixes=prefixes, separators=separators)
         zs_results_file_suffix = '_layer_sweep.json'
         fs_shuffled_results_file_suffix = '_layer_sweep.json'
 
