@@ -92,6 +92,59 @@ def replace_activation_w_avg(layer_head_token_pairs, avg_activations, model, mod
 
     return rep_act
 
+def patch_mlp_out(edit_layer, mlp_out, device, idx=-1):
+    """
+    Step 3 of path patching (from attn to mlp)
+    Patch mlp output of a specific layer with cached mlp output
+
+    Parameters:
+    edit_layer: the layer to patch the mlp output
+    mlp_out: cached mlp output to patch into the model
+    device: device of the model (cuda gpu or cpu) 
+    idx: the token index to patch at
+
+    Returns:
+    patch_act: a function specifying how to patch a layer's mlp output
+    """
+    def patch_act(output, layer_name):
+        current_layer = int(layer_name.split(".")[2])
+        if current_layer == edit_layer:
+            output[:, idx] = mlp_out[:, idx].to(device)
+            return output
+        else:
+            return output
+            
+    return patch_act
+
+def path_patch_function_vector_attn_out(edit_layer, fv_vector, device, base_cached, idx=-1):
+    """
+    Step 2 of path patching (from attn to mlp)
+    Pacth fv to replace the attntion output of a specific layer, freeze all other layers.
+    Freeze means replace their outputs with cached outputs from a base run / clean run (base_cached) 
+
+    Parameters:
+    edit_layer: the layer to perform the FV intervention
+    fv_vector: the function vector to add as an intervention, '1 d_model'
+    device: device of the model (cuda gpu or cpu)
+    idx: the token index to add the function vector at
+
+    Returns:
+    path_patch_act: a fuction specifying how to path patch a layer's attn output with a function vector  
+    """
+    def path_patch_act(output, layer_name):
+        current_layer = int(layer_name.split(".")[2])
+        current_component = layer_name.split(".")[3]
+        if current_layer == 25 and current_component == 'mlp':
+            mlp_path = '/oscar/data/epavlick/zyang220/results/fv_comm/gpt-j-6b/10heads/mlp_out_path_patch_attn_mlp.pt'
+            torch.save(output[:, idx].cpu(), mlp_path)
+        output[:, idx] = base_cached[layer_name][:, idx].to(device)
+        if current_layer == edit_layer and current_component == 'attn':
+            output[:, idx] = fv_vector.to(device)
+
+        return output
+        
+    return path_patch_act
+
 def patch_function_vector_attn_out(edit_layer, fv_vector, device, idx=-1):
     """
     Pacth fv to replace the attntion output of a specific layer 
@@ -107,12 +160,10 @@ def patch_function_vector_attn_out(edit_layer, fv_vector, device, idx=-1):
     """
     def patch_act(output, layer_name):
         current_layer = int(layer_name.split(".")[2])
-        if current_layer == edit_layer:
-            if isinstance(output, tuple):
-                return output
-            else:
-                output[:, idx] = fv_vector.to(device)
-                return output
+        current_component = layer_name.split(".")[3]
+        if current_layer == edit_layer and current_component == 'attn':
+            output[:, idx] = fv_vector.to(device)
+            return output
         else:
             return output
 
@@ -146,10 +197,11 @@ def add_function_vector(edit_layer, fv_vector, device, idx=-1):
 
 def function_vector_intervention(sentence, target, edit_layer, function_vector, 
     model, model_config, tokenizer, compute_nll=False, generate_str=False,
-    fv_intervention='resid',
+    fv_intervention='add_resid', mlp_layer=None,
 ):
     """
-    Runs the model on the sentence and adds the function_vector to the output of edit_layer as a model intervention, predicting a single token.
+    Runs the model on the sentence and adds the function_vector to the output 
+    of edit_layer as a model intervention, predicting a single token.
     Returns the output of the model with and without intervention.
 
     Parameters:
@@ -160,12 +212,19 @@ def function_vector_intervention(sentence, target, edit_layer, function_vector,
     model: huggingface model
     model_config: contains model config information (n layers, n heads, etc.)
     tokenizer: huggingface tokenizer
-    compute_nll: whether to compute the negative log likelihood of a teacher-forced completion (used to compute perplexity (PPL))
+    compute_nll: whether to compute the negative log likelihood of a teacher-forced 
+    completion (used to compute perplexity (PPL))
     generate_str: whether to generate a string of tokens or predict a single token
-    fv_intervention: how to integrate fv (resid: add to the residual stream; attn_out: patch to replace attn outputs)
+    fv_intervention: how to integrate fv 
+        add_resid: add to the residual stream; 
+        patch_attn: patch to replace attn outputs;
+        path_patch_attn: patch to attn_out and freeze others 
 
     Returns:
-    fvi_output: a tuple containing output results of a clean run and intervened run of the model
+    fvi_output: a tuple containing 
+        output results of a clean run 
+        output results of a intervened run 
+        mlp output vector of a targeted layer (mlp_out) 
     """
     # Clean Run, No Intervention:
     device = model.device
@@ -185,29 +244,46 @@ def function_vector_intervention(sentence, target, edit_layer, function_vector,
     elif generate_str:
         MAX_NEW_TOKENS = 16
         output = model.generate(inputs.input_ids, top_p=0.9, temperature=0.1,
-                                max_new_tokens=MAX_NEW_TOKENS)
+            max_new_tokens=MAX_NEW_TOKENS)
         clean_output = tokenizer.decode(output.squeeze()[-MAX_NEW_TOKENS:])
         intervention_idx = -1
     else:
-        clean_output = model(**inputs).logits[:,-1,:]
+        if fv_intervention == "path_patch_attn": 
+            # step 1 of path patching, get base_cache
+            intervention_layers = model_config['mlp_hook_names'] + model_config['attn_hook_names']
+            with TraceDict(model, layers=intervention_layers) as base_cache:     
+                clean_output = model(**inputs).logits[:,-1,:]
+                base_cache = {k: v.output.cpu() for k, v in base_cache.items()}
+                 # batch_size x n_tokens x vocab_size, only want last token prediction
+        else: 
+            clean_output = model(**inputs).logits[:,-1,:]
         intervention_idx = -1
 
     # Perform Intervention
     ## get fuction that specifies how to add a function vector to a layer's output hidden state
-    if fv_intervention == "resid": 
+    if fv_intervention == "add_resid": 
         intervention_fn = add_function_vector(edit_layer, 
             function_vector.reshape(1, model_config['resid_dim']), 
             model.device, idx=intervention_idx
         )
         intervention_layers = model_config['layer_hook_names']
-    elif fv_intervention == "attn_out":
+
+    elif fv_intervention == "patch_attn":
         intervention_fn = patch_function_vector_attn_out(edit_layer, 
             function_vector.reshape(1, model_config['resid_dim']), 
             model.device, idx=intervention_idx
         )
-        intervention_layers = model_config['attn_hook_names']
+        intervention_layers = model_config['attn_hook_names'] + model_config['mlp_hook_names']
 
-    with TraceDict(model, layers=intervention_layers, edit_output=intervention_fn):     
+    # step 2 of path patching, patch fv to attn_out and freeze everything else
+    elif fv_intervention == "path_patch_attn": 
+        intervention_fn = path_patch_function_vector_attn_out(edit_layer, 
+            function_vector.reshape(1, model_config['resid_dim']), 
+            model.device, base_cache, idx=intervention_idx, 
+        )
+        intervention_layers = model_config['attn_hook_names'] + model_config['mlp_hook_names']
+    
+    with TraceDict(model, layers=intervention_layers, edit_output=intervention_fn) as fv_patched_cache: 
         if compute_nll:
             output = model(**nll_inputs, labels=nll_targets)
             intervention_nll = output.loss.item()
@@ -217,11 +293,36 @@ def function_vector_intervention(sentence, target, edit_layer, function_vector,
                                     max_new_tokens=MAX_NEW_TOKENS)
             intervention_output = tokenizer.decode(output.squeeze()[-MAX_NEW_TOKENS:])
         else:
-            intervention_output = model(**inputs).logits[:,-1,:] # batch_size x n_tokens x vocab_size, only want last token prediction
-    
-    fvi_output = (clean_output, intervention_output)
+            intervention_output = model(**inputs).logits[:,-1,:] 
+        
+        fv_patched_cache = {k: v.output.cpu() for k, v in fv_patched_cache.items()}
+    if fv_intervention != "path_patch_attn":      # batch_size x n_tokens x vocab_size, only want last token prediction
+        mlp_out = fv_patched_cache[f'transformer.h.{mlp_layer}.mlp.fc_out'][:, -1] # -> '1 resid_dim'
+
+    # step 3 of path patching: patch mlp_out 
+    else:    
+        mlp_path = '/oscar/data/epavlick/zyang220/results/fv_comm/gpt-j-6b/10heads/mlp_out_path_patch_attn_mlp.pt'
+        mlp_out = torch.load(mlp_path)
+        intervention_fn = patch_mlp_out(mlp_layer, 
+            mlp_out, 
+            model.device, idx=intervention_idx,
+        )
+        intervention_layers = model_config['mlp_hook_names']
+        with TraceDict(model, layers=intervention_layers, edit_output=intervention_fn):
+            if compute_nll:
+                output = model(**nll_inputs, labels=nll_targets)
+                intervention_nll = output.loss.item()
+                intervention_output = output.logits[:,original_pred_idx,:]
+            elif generate_str:
+                output = model.generate(inputs.input_ids, top_p=0.9, temperature=0.1,
+                                        max_new_tokens=MAX_NEW_TOKENS)
+                intervention_output = tokenizer.decode(output.squeeze()[-MAX_NEW_TOKENS:])
+            else:
+                intervention_output = model(**inputs).logits[:,-1,:]
+            
+    fvi_output = (clean_output, intervention_output, mlp_out)
     if compute_nll:
-        fvi_output += (clean_nll, intervention_nll)
+        fvi_output += (clean_nll, intervention_nll, mlp_out)
     
     return fvi_output
 

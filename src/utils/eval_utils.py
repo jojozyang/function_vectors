@@ -120,7 +120,8 @@ def fv_to_vocab(function_vector, model, model_config, tokenizer, n_tokens=10):
     decoded_tokens = [(tokenizer.decode(x),round(y.item(), 4)) for x,y in zip(inds.squeeze(), vals.squeeze())]
     return decoded_tokens
 
-def compute_dataset_baseline(dataset, model, model_config, tokenizer, n_shots=10, seed=42, generate_str=False, metric=None, prefixes=None, separators=None) -> dict:
+def compute_dataset_baseline(dataset, model, model_config, tokenizer, n_shots=10, seed=42, 
+    generate_str=False, metric=None, prefixes=None, separators=None) -> dict:
     """
     Computes the ICL performance of the model on the provided dataset for a varying number of shots.
 
@@ -140,8 +141,11 @@ def compute_dataset_baseline(dataset, model, model_config, tokenizer, n_shots=10
     results_dict = {}
     for N in range(n_shots+1):
         set_seed(seed)
-        results_dict[N] = n_shot_eval_no_intervention(dataset, n_shots=N, model=model, model_config=model_config, tokenizer=tokenizer,
-                                                      generate_str=generate_str, metric=metric, prefixes=prefixes, separators=separators)
+        results_dict[N] = n_shot_eval_no_intervention(dataset, n_shots=N, model=model, 
+            model_config=model_config, tokenizer=tokenizer,
+            generate_str=generate_str, metric=metric, prefixes=prefixes, 
+            separators=separators, 
+        )
     return results_dict
 
 def is_nontrivial_prefix(prediction: str, target: str) -> bool:
@@ -151,7 +155,8 @@ def is_nontrivial_prefix(prediction: str, target: str) -> bool:
     return len(prediction) > 0 and target.startswith(prediction)
 
 # Evaluate a sentence
-def sentence_eval(sentence, target, model, tokenizer, compute_nll=True, generate_str=False, pred_file=None, metric_fn=None):
+def sentence_eval(sentence, target, model, model_config, tokenizer, 
+    compute_nll=True, generate_str=False, pred_file=None, metric_fn=None, mlp_layer=None):
     """
     Evaluate a single sentence completion for a model, comparing to the given target.
 
@@ -164,9 +169,10 @@ def sentence_eval(sentence, target, model, tokenizer, compute_nll=True, generate
     generate_str: whether to generate a string of tokens or predict a single token
     pred_file: filepath to save intermediate generations for debugging
     metric: metric to use for longer generations (F1, exact match, etc.)
+    mlp_layer: int, mlp_layer to cache activations for 
 
     Returns:
-    model output on the provided sentence
+    model output on the provided sentence, mlp outputs if mlp_layer is not None 
     """
     # Clean Run, No Intervention:
     device = model.device
@@ -194,20 +200,29 @@ def sentence_eval(sentence, target, model, tokenizer, compute_nll=True, generate
         if pred_file:
             pred_file.write(f"{parsed_str.strip()}\n")
     else:
-        clean_output = model(**inputs).logits[:,-1,:]
+        if mlp_layer is None:
+            clean_output = model(**inputs).logits[:,-1,:]
+        else:
+            intervention_layers = model_config['mlp_hook_names'] 
+            with TraceDict(model, layers=intervention_layers) as source_cache: 
+                clean_output = model(**inputs).logits[:,-1,:]
+                source_cache = {k: v.output.cpu() for k, v in source_cache.items()}
+            mlp_out = source_cache[f'transformer.h.{mlp_layer}.mlp.fc_out'][:, -1] # -> '1 resid_dim'
     
-
     if compute_nll:
         return clean_output, clean_nll
     elif generate_str:
-        return score
+        return score      
     else:
-        return clean_output 
+        if mlp_layer is not None:
+            return clean_output, mlp_out 
+        else:
+            return clean_output
 
 
 def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_config, tokenizer, shuffle_labels:bool=False,
                 filter_set=None, prefixes=None, separators=None, generate_str=False, pred_filepath=None,
-                metric="f1_score", fv_intervention='resid'):
+                metric="f1_score", fv_intervention='add_resid', mlp_layer=None):
     """
     Evaluate a model and FV intervention on the model using the provided ICL dataset.
 
@@ -226,10 +241,16 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
     generate_str: whether to generate a string of tokens or predict a single token
     pred_filepath: filepath to save intermediate generations for debugging
     metric: metric to use for longer generations (F1, exact match, etc.)
-    fv_intervention: how to integrate fv (resid: add to the residual stream; attn_out: patch to replace attn outputs)
+    fv_intervention: how to integrate fv 
+        add_resid: add to the residual stream; 
+        patch_attn: patch to replace attn outputs; 
+        path_patch_attn: patch to replace attn outputs in the mlp layer
+    mlp_layer: int, targeted mlp layer 
 
     Returns:
-    results: dict of topk accuracy on the test dataset, for both the model's n-shot, and n-shot + FV intervention, as well as the token rank of each prediction
+    results: dict of topk accuracy on the test dataset, for both the model's n-shot, and n-shot + FV intervention, 
+        as well as the token rank of each prediction
+    mlp_out: mlp output vector of the targeted layer
     """
     clean_rank_list = []
     intervention_rank_list = []
@@ -249,6 +270,7 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
     else:
         pred_file = None        
 
+    mlp_out_mean = torch.zeros(1, model_config['resid_dim'])
     for j in tqdm(range(len(dataset['test'])), total=len(dataset['test'])):
         if j not in filter_set:
             continue
@@ -287,24 +309,30 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
                 metric_fn = first_word_score
             else:
                 raise ValueError(f"Unknown metric: {metric}. Recognized metrics: [\"f1_score\", \"exact_match_score\"]")
-            clean_output, intervention_output = function_vector_intervention(sentence, target = target, edit_layer = edit_layer, 
+            clean_output, intervention_output, mlp_out = function_vector_intervention(
+                sentence, target = target, edit_layer = edit_layer, 
                 function_vector = fv_vector,
                 model=model, model_config=model_config, tokenizer=tokenizer, 
-                compute_nll=False, generate_str=generate_str, fv_intervention=fv_intervention)
+                compute_nll=False, generate_str=generate_str, 
+                fv_intervention=fv_intervention, mlp_layer=mlp_layer,
+            )
             clean_parsed_str, clean_score = parse_generation(clean_output, target, metric_fn)
             intervention_parsed_str, intervention_score = parse_generation(intervention_output, target, metric_fn)
             
             clean_score_list.append(clean_score)
             intervention_score_list.append(intervention_score)
+            mlp_out_mean = (mlp_out_mean + mlp_out) / (j+1)
 
             if pred_file:
                 pred_file.write(f"{clean_parsed_str.strip()}\t|||\t{intervention_parsed_str}\n")
 
         else:
-            clean_output, intervention_output = function_vector_intervention(sentence, target = [target], edit_layer = edit_layer, 
+            clean_output, intervention_output, mlp_out = function_vector_intervention(
+                sentence, target = [target], edit_layer = edit_layer, 
                 function_vector = fv_vector,
                 model=model, model_config=model_config, tokenizer=tokenizer, 
                 compute_nll=False, fv_intervention=fv_intervention,
+                mlp_layer=mlp_layer,
             ) 
         
             clean_rank = compute_individual_token_rank(clean_output, target_token_id)
@@ -312,6 +340,7 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
             
             clean_rank_list.append(clean_rank)
             intervention_rank_list.append(intervention_rank)
+            mlp_out_mean = (mlp_out_mean + mlp_out) / (j+1)
 
     if generate_str:
         results = {"clean_score": clean_score_list,
@@ -326,13 +355,16 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
     if pred_filepath:
         pred_file.close()
     
-    return results
+    return results, mlp_out_mean
+
 
 
 # Evaluate few-shot dataset w/o intervention
-def n_shot_eval_no_intervention(dataset, n_shots, model, model_config, tokenizer, compute_ppl=True, generate_str=False,
-                                shuffle_labels=False, prefixes=None, separators=None, pred_filepath=None,
-                                metric="f1_score", test_split='test'):
+def n_shot_eval_no_intervention(dataset, n_shots, model, model_config, 
+    tokenizer, compute_ppl=True, generate_str=False, mlp_layer=None,
+    shuffle_labels=False, prefixes=None, separators=None, pred_filepath=None,
+    metric="f1_score", test_split='test', 
+):
     """
     Evaluate a model (without any interventions) on the provided ICL dataset.
 
@@ -350,7 +382,7 @@ def n_shot_eval_no_intervention(dataset, n_shots, model, model_config, tokenizer
     pred_filepath: filepath to save intermediate generations for debugging
     metric: metric to use for longer generations (F1, exact match, etc.)
     test_split: the dataset test split to use as the "test" dataset, typically set to 'test' or 'valid'
-
+    mlp_layer: int, mlp_layer to cache activations for 
     Returns:
     results: dict of topk (k=1,2,3) accuracy on the test_split dataset, for both the model's n-shot
     """
@@ -369,6 +401,9 @@ def n_shot_eval_no_intervention(dataset, n_shots, model, model_config, tokenizer
         pred_file = open(pred_filepath, 'w')
     else:
         pred_file = None
+    
+    if mlp_layer is not None:
+        mlp_out_mean = torch.zeros(1, model_config['resid_dim'])
 
     for j in tqdm(range(len(dataset[test_split])), total=len(dataset[test_split])):
         if n_shots == 0:
@@ -397,8 +432,8 @@ def n_shot_eval_no_intervention(dataset, n_shots, model, model_config, tokenizer
         
         if compute_ppl:
             clean_output, clean_nll = sentence_eval(sentence, target = [target],
-                                                    model=model, tokenizer=tokenizer, 
-                                                    compute_nll=compute_ppl)
+                                                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                                                    compute_nll=compute_ppl, mlp_layer=mlp_layer)
             clean_nll_list.append(clean_nll)
             
         elif generate_str:
@@ -410,19 +445,28 @@ def n_shot_eval_no_intervention(dataset, n_shots, model, model_config, tokenizer
                 metric_fn = first_word_score
             else:
                 raise ValueError(f"Unknown metric: {metric}. Recognized metrics: [\"f1_score\", \"exact_match_score\"]")
-            score = sentence_eval(sentence, target=target, model=model,
+            score = sentence_eval(sentence, target=target, model=model, model_config=model_config,
                                   tokenizer=tokenizer, compute_nll=False,
                                   generate_str=True, pred_file=pred_file,
-                                  metric_fn=metric_fn)
+                                  metric_fn=metric_fn, mlp_layer=mlp_layer)
             score_list.append(score)
-        else:
-            clean_output = sentence_eval(sentence, target = [target],
-                                         model=model, tokenizer=tokenizer, compute_nll=False)
 
+        else:
+            if mlp_layer is not None:
+                clean_output, mlp_out = sentence_eval(sentence, target = [target],
+                    model=model, model_config=model_config, tokenizer=tokenizer, compute_nll=False,
+                    mlp_layer=mlp_layer,   
+                )    
+                mlp_out_mean = (mlp_out_mean + mlp_out) / (j+1) # Update running mean of mlp outputs                         
+            else: 
+                clean_output = sentence_eval(sentence, target = [target],
+                    model=model, model_config=model_config, tokenizer=tokenizer, compute_nll=False,
+                    mlp_layer=mlp_layer,
+                )
+        
         if not generate_str:
             clean_rank = compute_individual_token_rank(clean_output, target_token_id)
             clean_rank_list.append(clean_rank)
-
 
     if generate_str:
         results = {"score": score_list}
@@ -435,7 +479,10 @@ def n_shot_eval_no_intervention(dataset, n_shots, model, model_config, tokenizer
     if pred_filepath:
         pred_file.close()
     
-    return results
+    if mlp_layer is not None:
+        return results, mlp_out_mean
+    else:
+        return results
 
 
 # Logic from huggingface `evaluate` library
@@ -581,18 +628,21 @@ def portability_eval(dataset, fv_vector, edit_layer:int, model, model_config, to
 
         set_seed(seed)
         # FS Eval + Filtering
-        fs_results = n_shot_eval_no_intervention(dataset=dataset, n_shots=10, model=model, model_config=model_config, tokenizer=tokenizer, compute_ppl=False, prefixes=p, separators=s)
+        fs_results = n_shot_eval_no_intervention(dataset=dataset, n_shots=10, model=model, 
+            model_config=model_config, tokenizer=tokenizer, compute_ppl=False, prefixes=p, 
+            separators=s, 
+        )
         filter_set = np.where(np.array(fs_results['clean_rank_list']) == 0)[0]
         fs_res_dict[i] = fs_results
 
         # ZS Eval
-        zs_res_dict[i] = n_shot_eval(dataset, fv_vector, edit_layer, 0, model, 
+        zs_res_dict[i], _ = n_shot_eval(dataset, fv_vector, edit_layer, 0, model, 
             model_config, tokenizer, filter_set=filter_set, prefixes=p, 
-            separators=s, fv_intervention=fv_intervention)
+            separators=s, fv_intervention=fv_intervention, mlp_layer=mlp_layer)
 
         # ZS Eval
-        fs_shuffled_res_dict[i] = n_shot_eval(dataset, fv_vector, edit_layer, 10, model,
+        fs_shuffled_res_dict[i], _ = n_shot_eval(dataset, fv_vector, edit_layer, 10, model,
             model_config, tokenizer, filter_set=filter_set, prefixes=p,
-            separators=s, shuffle_labels=True, fv_intervention=fv_intervention)
+            separators=s, shuffle_labels=True, fv_intervention=fv_intervention, mlp_layer=mlp_layer)
     
     return fs_res_dict, zs_res_dict,fs_shuffled_res_dict,  templates

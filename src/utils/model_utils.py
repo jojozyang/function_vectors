@@ -60,7 +60,8 @@ def load_gpt_model_and_tokenizer(model_name:str, device='cuda'):
                       "name_or_path":model.config.name_or_path,
                       "attn_hook_names":[f'transformer.h.{layer}.attn.out_proj' for layer in range(model.config.n_layer)],
                       "layer_hook_names":[f'transformer.h.{layer}' for layer in range(model.config.n_layer)],
-                      "prepend_bos":False}
+                      "mlp_hook_names": [f'transformer.h.{layer}.mlp.fc_out' for layer in range(model.config.n_layer)],
+                      "prepend_bos":False,}
 
     elif 'gpt-neox' in model_name.lower() or 'pythia' in model_name.lower():
         tokenizer = AutoTokenizer.from_pretrained(model_name)
