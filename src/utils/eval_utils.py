@@ -220,16 +220,20 @@ def sentence_eval(sentence, target, model, model_config, tokenizer,
             return clean_output
 
 
-def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_config, tokenizer, shuffle_labels:bool=False,
-                filter_set=None, prefixes=None, separators=None, generate_str=False, pred_filepath=None,
+def n_shot_eval(dataset, intervention_vector, edit_layer: int, n_shots: int, 
+                model, model_config, tokenizer, 
+                shuffle_labels:bool=False, filter_set=None, prefixes=None, separators=None, 
+                generate_str=False, pred_filepath=None, intervention_type='fv',
                 metric="f1_score", fv_intervention='add_resid', mlp_layer=None):
     """
     Evaluate a model and FV intervention on the model using the provided ICL dataset.
 
     Parameters:
     dataset: ICL dataset
-    function_vector: torch vector that triggers execution of a task when added to a particular layer
-    edit_layer: layer index 
+    intervention_vector: torch vector that will be integrated into the model 
+    edit_layer: layer to intervene on 
+        int: layer index
+        list: list of layer indices
     n_shots: the number of ICL examples in each in-context prompt
     model: huggingface model
     model_config: contains model config information (n layers, n heads, etc.)
@@ -241,16 +245,19 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
     generate_str: whether to generate a string of tokens or predict a single token
     pred_filepath: filepath to save intermediate generations for debugging
     metric: metric to use for longer generations (F1, exact match, etc.)
+    intervention_type: type of intervention to perform
+        fv: function vector intervention
+        mlp_O: mlp output vector intervention
     fv_intervention: how to integrate fv 
         add_resid: add to the residual stream; 
         patch_attn: patch to replace attn outputs; 
         path_patch_attn: patch to replace attn outputs in the mlp layer
-    mlp_layer: int, targeted mlp layer 
+    mlp_layer: int, layer to extract mlp output vector from 
 
     Returns:
     results: dict of topk accuracy on the test dataset, for both the model's n-shot, and n-shot + FV intervention, 
         as well as the token rank of each prediction
-    mlp_out: mlp output vector of the targeted layer
+    mlp_out: mlp output vector of mlp_layer
     """
     clean_rank_list = []
     intervention_rank_list = []
@@ -309,38 +316,55 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
                 metric_fn = first_word_score
             else:
                 raise ValueError(f"Unknown metric: {metric}. Recognized metrics: [\"f1_score\", \"exact_match_score\"]")
-            clean_output, intervention_output, mlp_out = function_vector_intervention(
-                sentence, target = target, edit_layer = edit_layer, 
-                function_vector = fv_vector,
-                model=model, model_config=model_config, tokenizer=tokenizer, 
-                compute_nll=False, generate_str=generate_str, 
-                fv_intervention=fv_intervention, mlp_layer=mlp_layer,
-            )
+            if intervention_type == 'fv':
+                clean_output, intervention_output, mlp_out = function_vector_intervention(
+                    sentence, target=target, edit_layer=edit_layer, 
+                    function_vector = intervention_vector,
+                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                    compute_nll=False, generate_str=generate_str, 
+                    fv_intervention=fv_intervention, mlp_layer=mlp_layer,
+                )
+            elif intervention_type == 'mlp_O':
+                clean_output, intervention_output = mlp_output_intervention(
+                    sentence, target=target, edit_layer=edit_layer, 
+                    MLP_O = intervention_vector,
+                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                    compute_nll=False, generate_str=generate_str, 
+                )
+
             clean_parsed_str, clean_score = parse_generation(clean_output, target, metric_fn)
             intervention_parsed_str, intervention_score = parse_generation(intervention_output, target, metric_fn)
             
             clean_score_list.append(clean_score)
             intervention_score_list.append(intervention_score)
-            mlp_out_mean = (mlp_out_mean + mlp_out) / (j+1)
+            if intervention_type == 'fv':
+                mlp_out_mean = (mlp_out_mean + mlp_out) / (j+1)
 
             if pred_file:
                 pred_file.write(f"{clean_parsed_str.strip()}\t|||\t{intervention_parsed_str}\n")
 
         else:
-            clean_output, intervention_output, mlp_out = function_vector_intervention(
-                sentence, target = [target], edit_layer = edit_layer, 
-                function_vector = fv_vector,
-                model=model, model_config=model_config, tokenizer=tokenizer, 
-                compute_nll=False, fv_intervention=fv_intervention,
-                mlp_layer=mlp_layer,
-            ) 
-        
+            if intervention_type == 'fv':
+                clean_output, intervention_output, mlp_out = function_vector_intervention(
+                    sentence, target=[target], edit_layer=edit_layer, 
+                    function_vector = intervention_vector,
+                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                    compute_nll=False, fv_intervention=fv_intervention,
+                    mlp_layer=mlp_layer,
+                ) 
+                mlp_out_mean = (mlp_out_mean + mlp_out) / (j+1)
+            elif intervention_type == 'mlp_O':
+                clean_output, intervention_output = mlp_output_intervention(
+                    sentence, target=[target], edit_layer=edit_layer, 
+                    MLP_O=intervention_vector,
+                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                    compute_nll=False,   
+                ) 
+
             clean_rank = compute_individual_token_rank(clean_output, target_token_id)
             intervention_rank = compute_individual_token_rank(intervention_output, target_token_id)
-            
             clean_rank_list.append(clean_rank)
             intervention_rank_list.append(intervention_rank)
-            mlp_out_mean = (mlp_out_mean + mlp_out) / (j+1)
 
     if generate_str:
         results = {"clean_score": clean_score_list,
@@ -355,9 +379,10 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
     if pred_filepath:
         pred_file.close()
     
-    return results, mlp_out_mean
-
-
+    if intervention_type == 'fv':
+        return results, mlp_out_mean
+    else:
+        return results
 
 # Evaluate few-shot dataset w/o intervention
 def n_shot_eval_no_intervention(dataset, n_shots, model, model_config, 

@@ -83,6 +83,7 @@ if __name__ == "__main__":
     set_seed(seed)
     dataset = load_dataset(dataset_name, root_data_dir=root_data_dir, test_size=test_split, seed=seed)
 
+    # Create base save directory if it doesn't exist
     if not os.path.exists(save_path_root):
         os.makedirs(save_path_root)
     
@@ -185,19 +186,21 @@ if __name__ == "__main__":
         fv, top_heads = compute_function_vector(mean_activations, indirect_effect, model, 
             model_config=model_config, n_top_heads=n_top_heads)   
     
-    # Run Evaluation
+    # Run Fv Evaluation
     if isinstance(eval_edit_layer, int):
         print(f"Running ZS Eval with edit_layer={eval_edit_layer}")
         set_seed(seed)
         if generate_str:
-            pred_filepath = f"{save_path_root}/preds/{model_config['name_or_path'].replace('/', '_')}_ZS_intervention_layer{eval_edit_layer}.txt"
-            zs_results, mlp_O_Fv = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=eval_edit_layer, n_shots=0,
+            pred_dir = f"{save_path_root}/preds"
+            os.makedirs(pred_dir, exist_ok=True)
+            pred_filepath = f"{pred_dir}/{model_config['name_or_path'].replace('/', '_')}_ZS_intervention_layer{eval_edit_layer}.txt"
+            zs_results, mlp_O_Fv = n_shot_eval(dataset=dataset, intervention_vector=fv, edit_layer=eval_edit_layer, n_shots=0,
                 model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
                 generate_str=generate_str, metric=metric, pred_filepath=pred_filepath, 
                 prefixes=prefixes, separators=separators, fv_intervention=fv_intervention,
                 mlp_layer=mlp_layer)
         else:
-            zs_results, mlp_O_Fv = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=eval_edit_layer, n_shots=0,
+            zs_results, mlp_O_Fv = n_shot_eval(dataset=dataset, intervention_vector=fv, edit_layer=eval_edit_layer, n_shots=0,
                 model=model, model_config=model_config, tokenizer=tokenizer, 
                 filter_set=filter_set, prefixes=prefixes, separators=separators,
                 fv_intervention=fv_intervention, mlp_layer=mlp_layer)
@@ -206,14 +209,14 @@ if __name__ == "__main__":
         set_seed(seed)
         if generate_str:
             pred_filepath = f"{save_path_root}/preds/{model_config['name_or_path'].replace('/', '_')}_{n_shots}shots_shuffled_intervention_layer{eval_edit_layer}.txt"
-            fs_shuffled_resultsmlp_layer, mlp_O_Fv = n_shot_eval(dataset=dataset, fv_vector=fv, edit_layer=eval_edit_layer, n_shots=n_shots, 
+            fs_shuffled_results, mlp_O_Fv = n_shot_eval(dataset=dataset, intervention_vector=fv, edit_layer=eval_edit_layer, n_shots=n_shots, 
                 model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set, 
                 shuffle_labels=True, generate_str=generate_str, metric=metric, 
                 pred_filepath=pred_filepath, prefixes=prefixes, separators=separators,
                 fv_intervention=fv_intervention, mlp_layer=mlp_layer)
         else:
             fs_shuffled_results, mlp_O_Fv = n_shot_eval(
-                dataset=dataset, fv_vector=fv, edit_layer=eval_edit_layer, n_shots=n_shots, 
+                dataset=dataset, intervention_vector=fv, edit_layer=eval_edit_layer, n_shots=n_shots, 
                 model=model, model_config=model_config, tokenizer=tokenizer, 
                 filter_set=filter_set, shuffle_labels=True, prefixes=prefixes, 
                 separators=separators, mlp_layer=mlp_layer
@@ -233,13 +236,13 @@ if __name__ == "__main__":
             # zero shot 
             if generate_str:
                 zs_results[edit_layer], mlp_O_Fv[edit_layer] = n_shot_eval(dataset=dataset,
-                    fv_vector=fv, edit_layer=edit_layer, n_shots=0, 
+                    intervention_vector=fv, edit_layer=edit_layer, n_shots=0, 
                     model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
                     generate_str=generate_str, metric=metric, prefixes=prefixes, separators=separators,
                     fv_intervention=fv_intervention, mlp_layer=mlp_layer)
             else:
                 zs_results[edit_layer], mlp_O_Fv[edit_layer] = n_shot_eval(dataset=dataset,
-                    fv_vector=fv, edit_layer=edit_layer, n_shots=0, 
+                    intervention_vector=fv, edit_layer=edit_layer, n_shots=0, 
                     prefixes=prefixes, separators=separators,
                     model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
                     fv_intervention=fv_intervention, mlp_layer=mlp_layer)
@@ -247,14 +250,14 @@ if __name__ == "__main__":
             # few shots with shuffled labels 
             if generate_str:
                 fs_shuffled_results[edit_layer], mlp_O_Fv[edit_layer] = n_shot_eval(
-                    dataset=dataset, fv_vector=fv, edit_layer=edit_layer, n_shots=n_shots, 
+                    dataset=dataset, intervention_vector=fv, edit_layer=edit_layer, n_shots=n_shots, 
                     model=model, model_config=model_config, tokenizer=tokenizer, 
                     filter_set = filter_set, generate_str=generate_str, metric=metric, 
                     shuffle_labels=True, prefixes=prefixes, separators=separators,
                     fv_intervention=fv_intervention, mlp_layer=mlp_layer)
             else:
                 fs_shuffled_results[edit_layer], mlp_O_Fv[edit_layer] = n_shot_eval(
-                    dataset=dataset, fv_vector=fv, edit_layer=edit_layer, n_shots=n_shots, 
+                    dataset=dataset, intervention_vector=fv, edit_layer=edit_layer, n_shots=n_shots, 
                     model=model, model_config=model_config, tokenizer=tokenizer, 
                     filter_set = filter_set, shuffle_labels=True, prefixes=prefixes, 
                     separators=separators, fv_intervention=fv_intervention, mlp_layer=mlp_layer)
@@ -263,24 +266,28 @@ if __name__ == "__main__":
         fs_shuffled_results_file_suffix = f'_{fv_intervention}_layer_sweep.json'
         mlp_O_Fv_file_suffix = f'_{fv_intervention}_layer_sweep.pt'
        
-    # Save results to files
+    ## Save results to files
     if universal_set:
         head_name = 'universal_heads'
     else:
         head_name = 'task_specific_heads'
-    zs_results_file_name = make_valid_path_name(f'{save_path_root}/Fv_eval_{head_name}/zs_results' 
-        + zs_results_file_suffix)
+    
+    ## Create directories if they don't exist
+    results_dir = make_valid_path_name(f'{save_path_root}/Fv_eval_{head_name}')
+    os.makedirs(results_dir, exist_ok=True)
+
+    zs_results_file_name = make_valid_path_name(f'{results_dir}/zs_results{zs_results_file_suffix}')
     args.zs_results_file_name = zs_results_file_name
     with open(zs_results_file_name, 'w') as results_file:
         json.dump(zs_results, results_file, indent=2)
-    fs_shuffled_results_file_name = make_valid_path_name(f'{save_path_root}/Fv_eval_{head_name}/fs_shuffled_results' 
-        + fs_shuffled_results_file_suffix)
+
+    fs_shuffled_results_file_name = make_valid_path_name(f'{results_dir}/fs_shuffled_results{fs_shuffled_results_file_suffix}')
     args.fs_shuffled_results_file_name = fs_shuffled_results_file_name
     with open(fs_shuffled_results_file_name, 'w') as results_file:
         json.dump(fs_shuffled_results, results_file, indent=2)
 
-    # Save mean of mlp_out across eidt layer 
-    args.mlp_O_Fv_path = make_valid_path_name(f'{save_path_root}/Fv_eval_{head_name}/mlp_O_{mlp_layer}_Fv'
+    ## Save mean of mlp_out across eidt layer 
+    args.mlp_O_Fv_path = make_valid_path_name(f'{results_dir}/mlp_O_{mlp_layer}_Fv'
         + mlp_O_Fv_file_suffix)
     torch.save(mlp_O_Fv, args.mlp_O_Fv_path)
 
@@ -295,7 +302,9 @@ if __name__ == "__main__":
         with open(baseline_file_name, 'w') as results_file:
             json.dump(baseline_results, results_file, indent=2)
 
-    # Write args to file
+    # Write fv args to file
     args_file_name = make_valid_path_name(f'{save_path_root}/fv_eval_args_{fv_intervention}.txt')
     with open(args_file_name, 'w') as arg_file:
         json.dump(args.__dict__, arg_file, indent=2)
+
+    

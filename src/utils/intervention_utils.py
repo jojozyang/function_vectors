@@ -94,25 +94,31 @@ def replace_activation_w_avg(layer_head_token_pairs, avg_activations, model, mod
 
 def patch_mlp_out(edit_layer, mlp_out, device, idx=-1):
     """
-    Step 3 of path patching (from attn to mlp)
-    Patch mlp output of a specific layer with cached mlp output
+    Patch mlp output of a specific layer with a mlp output vector
 
     Parameters:
-    edit_layer: the layer to patch the mlp output
+    edit_layer: int, the layer to patch the mlp output 
     mlp_out: cached mlp output to patch into the model
     device: device of the model (cuda gpu or cpu) 
-    idx: the token index to patch at
+    idx: int, the token index to patch at
 
     Returns:
     patch_act: a function specifying how to patch a layer's mlp output
     """
     def patch_act(output, layer_name):
         current_layer = int(layer_name.split(".")[2])
-        if current_layer == edit_layer:
-            output[:, idx] = mlp_out[:, idx].to(device)
-            return output
-        else:
-            return output
+        if isinstance(edit_layer, list):
+            if current_layer in edit_layer:
+                output[:, idx] = mlp_out[:, idx].to(device)
+                return output
+            else:
+                return output
+        elif isinstance(edit_layer, int):
+            if current_layer == edit_layer:
+                output[:, idx] = mlp_out[:, idx].to(device)
+                return output
+            else:
+                return output
             
     return patch_act
 
@@ -195,6 +201,77 @@ def add_function_vector(edit_layer, fv_vector, device, idx=-1):
 
     return add_act
 
+def mlp_output_intervention(sentence, target, edit_layer, MLP_O, 
+    model, model_config, tokenizer, compute_nll=False, generate_str=False,
+):
+    """
+    Runs the model on the sentence and adds the MLP_O to the output 
+    of edit_layer as a model intervention
+    Returns the output of the model with and without intervention.
+
+    Parameters:
+    sentence: the sentence to be run through the model
+    target: expected response of the model (str, or [str])
+    edit_layer: layer at which to add the MLP_O
+        int: layer index
+        list: list of layer indices
+    MLP_O: MLP output vector to add to the model, can be: 
+        mlp_O_FS: mlp output vector from fewshot runs
+        mlp_O_Fv_patch_attn: mlp output vector cached from patching function vector in base runs
+    model: huggingface model
+    model_config: contains model config information (n layers, n heads, etc.)
+    tokenizer: huggingface tokenizer
+    compute_nll: whether to compute the negative log likelihood of a teacher-forced 
+        completion (used to compute perplexity (PPL))
+    generate_str: whether to generate a string of tokens or predict a single token
+    """
+    # Clean Run, No Intervention:
+    device = model.device
+    inputs = tokenizer(sentence, return_tensors='pt').to(device)
+    original_pred_idx = len(inputs.input_ids.squeeze()) - 1
+    intervention_idx = -1
+
+    if compute_nll:
+        target_completion = "".join(sentence + target)
+        nll_inputs = tokenizer(target_completion, return_tensors='pt').to(device)
+        nll_targets = nll_inputs.input_ids.clone()
+        target_len = len(nll_targets.squeeze()) - len(inputs.input_ids.squeeze()) 
+        nll_targets[:,:-target_len] = -100  # This is the accepted value to skip indices when computing loss (see nn.CrossEntropyLoss default)
+        output = model(**nll_inputs, labels=nll_targets)
+        clean_nll = output.loss.item()
+        clean_output = output.logits[:,original_pred_idx,:]
+        intervention_idx = -1 - target_len
+    elif generate_str:
+        MAX_NEW_TOKENS = 16
+        output = model.generate(inputs.input_ids, top_p=0.9, temperature=0.1,
+            max_new_tokens=MAX_NEW_TOKENS)
+        clean_output = tokenizer.decode(output.squeeze()[-MAX_NEW_TOKENS:])
+        intervention_idx = -1
+    else: 
+        clean_output = model(**inputs).logits[:,-1,:]
+
+    # Perform MLP_O Intervention
+    intervention_fn = patch_mlp_out(edit_layer, MLP_O, device, idx=intervention_idx)
+    intervention_layers = model_config['mlp_hook_names']
+    with TraceDict(model, layers=intervention_layers, edit_output=intervention_fn):
+        if compute_nll:
+            output = model(**nll_inputs, labels=nll_targets)
+            intervention_nll = output.loss.item()
+            intervention_output = output.logits[:,original_pred_idx,:]
+        elif generate_str:
+            output = model.generate(inputs.input_ids, top_p=0.9, temperature=0.1,
+                                    max_new_tokens=MAX_NEW_TOKENS)
+            intervention_output = tokenizer.decode(output.squeeze()[-MAX_NEW_TOKENS:])
+        else:
+            intervention_output = model(**inputs).logits[:,-1,:] 
+    
+    # Output results
+    mlp_i_output = (clean_output, intervention_output)
+    if compute_nll:
+        mlp_i_output += (clean_nll, intervention_nll)
+    
+    return mlp_i_output
+
 def function_vector_intervention(sentence, target, edit_layer, function_vector, 
     model, model_config, tokenizer, compute_nll=False, generate_str=False,
     fv_intervention='add_resid', mlp_layer=None,
@@ -213,7 +290,7 @@ def function_vector_intervention(sentence, target, edit_layer, function_vector,
     model_config: contains model config information (n layers, n heads, etc.)
     tokenizer: huggingface tokenizer
     compute_nll: whether to compute the negative log likelihood of a teacher-forced 
-    completion (used to compute perplexity (PPL))
+        completion (used to compute perplexity (PPL))
     generate_str: whether to generate a string of tokens or predict a single token
     fv_intervention: how to integrate fv 
         add_resid: add to the residual stream; 
@@ -259,7 +336,7 @@ def function_vector_intervention(sentence, target, edit_layer, function_vector,
             clean_output = model(**inputs).logits[:,-1,:]
         intervention_idx = -1
 
-    # Perform Intervention
+    # Perform FV Intervention
     ## get fuction that specifies how to add a function vector to a layer's output hidden state
     if fv_intervention == "add_resid": 
         intervention_fn = add_function_vector(edit_layer, 
@@ -299,7 +376,7 @@ def function_vector_intervention(sentence, target, edit_layer, function_vector,
     if fv_intervention != "path_patch_attn":      # batch_size x n_tokens x vocab_size, only want last token prediction
         mlp_out = fv_patched_cache[f'transformer.h.{mlp_layer}.mlp.fc_out'][:, -1] # -> '1 resid_dim'
 
-    # step 3 of path patching: patch mlp_out 
+    ## step 3 of path patching: patch mlp_out 
     else:    
         mlp_path = '/oscar/data/epavlick/zyang220/results/fv_comm/gpt-j-6b/10heads/mlp_out_path_patch_attn_mlp.pt'
         mlp_out = torch.load(mlp_path)
