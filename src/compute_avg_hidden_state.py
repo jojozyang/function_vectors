@@ -57,9 +57,9 @@ if __name__ == "__main__":
 
         print("Computing Mean Activations")
         dataset = load_dataset(dataset_name, seed=seed)
-        mean_activations = get_mean_layer_activations(dataset, model=model, model_config=model_config, tokenizer=tokenizer, 
-                                                     n_icl_examples=n_shots, N_TRIALS=n_trials)
-
+        mean_activations = get_mean_layer_activations(dataset, model=model, model_config=model_config, 
+            tokenizer=tokenizer, n_icl_examples=n_shots, N_TRIALS=n_trials
+        )
 
         print("Saving mean layer activations")
         if not os.path.exists(save_path_root):

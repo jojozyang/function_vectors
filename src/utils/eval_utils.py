@@ -252,12 +252,12 @@ def n_shot_eval(dataset, intervention_vector, edit_layer: int, n_shots: int,
         add_resid: add to the residual stream; 
         patch_attn: patch to replace attn outputs; 
         path_patch_attn: patch to replace attn outputs in the mlp layer
-    mlp_layer: int, layer to extract mlp output vector from 
+    mlp_layer: int, layer to extract mlp output vector from (if intervention_type == 'fv')
 
     Returns:
     results: dict of topk accuracy on the test dataset, for both the model's n-shot, and n-shot + FV intervention, 
         as well as the token rank of each prediction
-    mlp_out: mlp output vector of mlp_layer
+    mlp_out: mlp output vector of mlp_layer (if intervention_type == 'fv')
     """
     clean_rank_list = []
     intervention_rank_list = []
@@ -353,6 +353,7 @@ def n_shot_eval(dataset, intervention_vector, edit_layer: int, n_shots: int,
                     mlp_layer=mlp_layer,
                 ) 
                 mlp_out_mean = (mlp_out_mean + mlp_out) / (j+1)
+            
             elif intervention_type == 'mlp_O':
                 clean_output, intervention_output = mlp_output_intervention(
                     sentence, target=[target], edit_layer=edit_layer, 
@@ -408,6 +409,7 @@ def n_shot_eval_no_intervention(dataset, n_shots, model, model_config,
     metric: metric to use for longer generations (F1, exact match, etc.)
     test_split: the dataset test split to use as the "test" dataset, typically set to 'test' or 'valid'
     mlp_layer: int, mlp_layer to cache activations for 
+    
     Returns:
     results: dict of topk (k=1,2,3) accuracy on the test_split dataset, for both the model's n-shot
     """
@@ -457,8 +459,8 @@ def n_shot_eval_no_intervention(dataset, n_shots, model, model_config,
         
         if compute_ppl:
             clean_output, clean_nll = sentence_eval(sentence, target = [target],
-                                                    model=model, model_config=model_config, tokenizer=tokenizer, 
-                                                    compute_nll=compute_ppl, mlp_layer=mlp_layer)
+                model=model, model_config=model_config, tokenizer=tokenizer, 
+                compute_nll=compute_ppl, mlp_layer=mlp_layer)
             clean_nll_list.append(clean_nll)
             
         elif generate_str:

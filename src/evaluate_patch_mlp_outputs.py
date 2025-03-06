@@ -61,7 +61,7 @@ def eval_patch_mlp(mlp_O, mlp_O_name, results_dir,
                 intervention_type='mlp_O',
             )
 
-    # patch to multple layers 
+    # patch to multiple layers 
     print("patching to multiple layers")
     edit_layer = np.arange(mlp_layer, model_config['n_layers'])
     dict_key = f"{edit_layer[0]}-{edit_layer[-1]}"
@@ -206,12 +206,13 @@ if __name__ == "__main__":
 
     if mlp_O_FS: 
         print("mlp_O_FS eval")
+        mlp_O_name = f'mlp_O_{mlp_layer}_FS'
         mlp_O_path = os.path.join(save_path_root, 
             f'{dataset_name}',
-            f'mlp_O_{mlp_layer}_FS.pt',
+            f'{mlp_O_name}.pt',
         )
         mlp_O = torch.load(mlp_O_path)
-        mlp_O_name = f'mlp_O_{mlp_layer}_FS'
+        
         eval_patch_mlp(mlp_O, mlp_O_name, results_dir=results_dir, 
             dataset=dataset, model=model, model_config=model_config, 
             tokenizer=tokenizer, filter_set=filter_set, 
@@ -221,14 +222,15 @@ if __name__ == "__main__":
 
     if mlp_O_Fv_patch_attn:
         print("mlp_O_Fv_patch_attn eval")
+        mlp_O_name = f'mlp_O_{mlp_layer}_Fv_patch_attn'
         mlp_O_path = os.path.join(save_path_root, 
             f'{dataset_name}',
             f'Fv_eval_{head_name}',
-            f'mlp_O_{mlp_layer}_Fv_patch_attn_layer_sweep.pt',
+            f'{mlp_O_name}_layer_sweep.pt',
         )
         mlp_O = torch.load(mlp_O_path)
         mlp_O = mlp_O[Fv_edit_layer]
-        mlp_O_name = f'mlp_O_{mlp_layer}_Fv_patch_attn'
+        
         eval_patch_mlp(mlp_O, mlp_O_name, results_dir=results_dir, 
             dataset=dataset, model=model, model_config=model_config, 
             tokenizer=tokenizer, filter_set=filter_set, 

@@ -10,17 +10,20 @@ from utils.eval_utils import *
 from utils.extract_utils import *
 from compute_indirect_effect import compute_indirect_effect
 
+"""
+Evaluate function vector (Fv) or function execution vector (mlp_O)
+"""
+
 if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--dataset_name', help='Name of the dataset to be loaded', type=str, required=True)
-    parser.add_argument('--n_top_heads', help='Number of attenion head outputs used to compute function vector', required=False, type=int, default=10)
     parser.add_argument('--edit_layer', help='Layer for intervention. If -1, sweep over all layers', type=int, required=False, default=-1) # 
     parser.add_argument('--model_name', help='Name of model to be loaded', type=str, required=False, default='EleutherAI/gpt-j-6b')
     parser.add_argument('--root_data_dir', help='Root directory of data files', type=str, required=False, default='../dataset_files')
     parser.add_argument('--save_path_root', help='File path to save to', type=str, required=False, default='/oscar/data/epavlick/zyang220/results/fv_comm')
-    parser.add_argument('--ie_path_root', help='File path to load indirect effects from', type=str, required=False, default=None)
+    #parser.add_argument('--ie_path_root', help='File path to load indirect effects from', type=str, required=False, default=None)
     parser.add_argument('--seed', help='Randomized seed', type=int, required=False, default=42)
     parser.add_argument('--device', help='Device to run on',type=str, required=False, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--mean_activations_path', help='Path to file containing mean_head_activations for the specified task', required=False, type=str, default=None)
@@ -33,20 +36,28 @@ if __name__ == "__main__":
     parser.add_argument('--compute_baseline', help='Whether to compute the model baseline 0-shot -> n-shot performance', type=bool, required=False, default=True)
     parser.add_argument('--generate_str', help='Whether to generate long-form completions for the task', action='store_true', required=False)
     parser.add_argument("--metric", help="Metric to use when evaluating generated strings", type=str, required=False, default="f1_score")
-    parser.add_argument("--universal_set", help="Flag for whether to evaluate using the univeral set of heads", action="store_true", required=False)
+    parser.add_argument("--universal_set", help="Flag for whether to evaluate using the univeral set of heads", 
+        action="store_true", required=False)
+    parser.add_argument("--intervention_type", help="Type of intervention to perform: fv or mlp_O",
+        type=str, required=True)
     parser.add_argument("--fv_intervention", 
         help="To add Fv to residual stream (add_resid) or replace attn outputs (patch_attn) or patch patching (path_patch_attn)", 
-        type=str, required=True)
-    parser.add_argument("--mlp_layer", help="target layer for patching or caching mlp_out",
-        type=int, required=True)
-        
+        type=str, required=False, default="add_resid")
+    parser.add_argument("--mlp_layer", help="target layer for patching or caching 'mlp_out_Fv..' for intervention_type == 'fv'",
+        type=int, required=False)
+    parser.add_argument('--n_top_heads', help='Number of attenion head outputs used to compute function vector', 
+        required=False, type=int, default=10)
+    parser.add_argument("--n_top_layers", help="Number of top layers to use for mlp_O intervention",
+        type=int, required=False, default=5)
+    parser.add_argument("--exclude_last_layer", help="Whether to exclude the last layer from the function execution vector",
+        type=bool, required=False, default=False)
     args = parser.parse_args()  
 
     dataset_name = args.dataset_name
     model_name = args.model_name
     root_data_dir = args.root_data_dir
     save_path_root = f"{args.save_path_root}/{dataset_name}"
-    ie_path_root = f"{args.ie_path_root}/{dataset_name}" if args.ie_path_root else save_path_root
+    #ie_path_root = f"{args.ie_path_root}/{dataset_name}" if args.ie_path_root else save_path_root
     seed = args.seed
     device = args.device
     mean_activations_path = args.mean_activations_path
@@ -67,7 +78,9 @@ if __name__ == "__main__":
     universal_set = args.universal_set
     fv_intervention = args.fv_intervention
     mlp_layer = args.mlp_layer
-
+    intervention_type = args.intervention_type
+    n_top_layers = args.n_top_layers
+    exclude_last_layer = args.exclude_last_layer
     print(args)
 
     # Load Model & Tokenizer
@@ -108,19 +121,20 @@ if __name__ == "__main__":
         )
         filter_set_validation = np.where(np.array(fs_results_validation['score']) == 1)[0]
         set_seed(seed)
-        fs_results, mlp_O_FS = n_shot_eval_no_intervention(dataset=dataset, n_shots=n_shots, 
+        fs_results = n_shot_eval_no_intervention(dataset=dataset, n_shots=n_shots, 
             model=model, model_config=model_config, tokenizer=tokenizer, compute_ppl=False,
             generate_str=True, metric=metric, prefixes=prefixes, separators=separators,
-            mlp_layer=mlp_layer, #cache mlp_out 
+            #mlp_layer=mlp_layer, #cache mlp_out 
         )
         filter_set = np.where(np.array(fs_results['score']) == 1)[0]
         # Save fs_results to file
         args.fs_results_file_name = fs_results_file_name
         with open(fs_results_file_name, 'w') as results_file:
             json.dump(fs_results, results_file, indent=2)
+
         # save mean of mlp outputs to file
-        args.mlp_O_FS_path = f'{save_path_root}/mlp_O_{mlp_layer}_FS.pt'
-        torch.save(mlp_O_FS, args.mlp_O_FS_path)
+        # args.mlp_O_FS_path = f'{save_path_root}/mlp_O_{mlp_layer}_FS.pt'
+        # torch.save(mlp_O_FS, args.mlp_O_FS_path)
     else:
         set_seed(seed+42)
         fs_results_validation = n_shot_eval_no_intervention(dataset=dataset, n_shots=n_shots,
@@ -129,10 +143,10 @@ if __name__ == "__main__":
         )
         filter_set_validation = np.where(np.array(fs_results_validation['clean_rank_list']) == 0)[0]
         set_seed(seed)
-        fs_results, mlp_O_FS = n_shot_eval_no_intervention(dataset=dataset, n_shots=n_shots, 
+        fs_results = n_shot_eval_no_intervention(dataset=dataset, n_shots=n_shots, 
             model=model, model_config=model_config, tokenizer=tokenizer, compute_ppl=True, 
             prefixes=prefixes, separators=separators, 
-            mlp_layer=mlp_layer, #cache mlp_out 
+            #mlp_layer=mlp_layer, #cache mlp_out 
         )
         filter_set = np.where(np.array(fs_results['clean_rank_list']) == 0)[0]
         # Save fs_results to file
@@ -140,33 +154,40 @@ if __name__ == "__main__":
         with open(fs_results_file_name, 'w') as results_file:
             json.dump(fs_results, results_file, indent=2)
         # save mean of mlp outputs to file
-        args.mlp_O_FS_path = f'{save_path_root}/mlp_O_{mlp_layer}_FS.pt'
-        torch.save(mlp_O_FS, args.mlp_O_FS_path)
+        # args.mlp_O_FS_path = f'{save_path_root}/mlp_O_{mlp_layer}_FS.pt'
+        # torch.save(mlp_O_FS, args.mlp_O_FS_path)
     
     # Load or Re-Compute mean_head_activations
     set_seed(seed)
     if mean_activations_path is not None and os.path.exists(mean_activations_path):
-        print(f"Loading mean_activations from {mean_activations_path}")
+        print(f"Loading mean activations from {mean_activations_path}")
         mean_activations = torch.load(mean_activations_path)
-    elif mean_activations_path is None and os.path.exists(f'{ie_path_root}/{dataset_name}_mean_head_activations.pt'):
-        mean_activations_path = f'{ie_path_root}/{dataset_name}_mean_head_activations.pt'
-        print(f"Loading mean_activations from {mean_activations_path}")
+    elif mean_activations_path is None and os.path.exists(
+            f'{save_path_root}/{dataset_name}_mean_activations_{intervention_type}.pt'):
+        mean_activations_path = f'{save_path_root}/{dataset_name}_mean_activations_{intervention_type}.pt'
+        print(f"Loading mean activations from {mean_activations_path}")
         mean_activations = torch.load(mean_activations_path)        
     else:
         print("Computing Mean Activations")
         set_seed(seed)
-        mean_activations = get_mean_head_activations(dataset, model=model, model_config=model_config, 
-            tokenizer=tokenizer, n_icl_examples=n_shots,
-            N_TRIALS=n_trials, prefixes=prefixes, separators=separators, filter_set=filter_set_validation)
-        args.mean_activations_path = f'{save_path_root}/{dataset_name}_mean_head_activations.pt'
+        if intervention_type == 'fv':
+            mean_activations = get_mean_head_activations(dataset, model=model, model_config=model_config, 
+                tokenizer=tokenizer, n_icl_examples=n_shots,
+                N_TRIALS=n_trials, prefixes=prefixes, separators=separators, filter_set=filter_set_validation)
+        elif intervention_type == 'mlp_O':
+            mean_activations = get_mean_mlp_O_activations(dataset, model=model, model_config=model_config, 
+                tokenizer=tokenizer, n_icl_examples=n_shots,
+                N_TRIALS=n_trials, prefixes=prefixes, separators=separators, filter_set=filter_set_validation)
+        args.mean_activations_path = f'{save_path_root}/{dataset_name}_mean_activations_{intervention_type}.pt'
         torch.save(mean_activations, args.mean_activations_path)
 
     # Load or Re-Compute indirect_effect values
     if indirect_effect_path is not None and os.path.exists(indirect_effect_path):
         print(f"Loading indirect_effect from {indirect_effect_path}")
         indirect_effect = torch.load(indirect_effect_path)
-    elif indirect_effect_path is None and os.path.exists(f'{ie_path_root}/{dataset_name}_indirect_effect.pt'):
-        indirect_effect_path = f'{ie_path_root}/{dataset_name}_indirect_effect.pt'
+    elif indirect_effect_path is None and os.path.exists(
+            f'{save_path_root}/{dataset_name}_indirect_effect_{intervention_type}.pt'):
+        indirect_effect_path = f'{save_path_root}/{dataset_name}_indirect_effect_{intervention_type}.pt'
         print(f"Loading indirect_effect from {indirect_effect_path}")
         indirect_effect = torch.load(indirect_effect_path) 
     elif not universal_set:     # Only compute indirect effects if we need to
@@ -174,8 +195,11 @@ if __name__ == "__main__":
         set_seed(seed)
         indirect_effect = compute_indirect_effect(dataset, mean_activations, model=model, 
             model_config=model_config, tokenizer=tokenizer, n_shots=n_shots,
-            n_trials=n_trials, last_token_only=True, prefixes=prefixes, separators=separators, filter_set=filter_set_validation)
-        args.indirect_effect_path = f'{save_path_root}/{dataset_name}_indirect_effect.pt'
+            n_trials=n_trials, last_token_only=True, prefixes=prefixes, 
+            separators=separators, filter_set=filter_set_validation,
+            act_source=intervention_type,
+        )
+        args.indirect_effect_path = f'{save_path_root}/{dataset_name}_indirect_effect_{intervention_type}.pt'
         torch.save(indirect_effect, args.indirect_effect_path)
         
     # Compute Function Vector
@@ -183,10 +207,22 @@ if __name__ == "__main__":
         fv, top_heads = compute_universal_function_vector(mean_activations, model, 
             model_config=model_config, n_top_heads=n_top_heads)   
     else:
-        fv, top_heads = compute_function_vector(mean_activations, indirect_effect, model, 
-            model_config=model_config, n_top_heads=n_top_heads)   
+        if intervention_type == 'fv':
+            print("Computing Function Vector")
+            fv, top_heads = compute_function_vector(mean_activations, 
+                indirect_effect, model, 
+                model_config=model_config, n_top_heads=n_top_heads,
+            ) 
+        elif intervention_type == 'mlp_O':
+            print("Computing Function Execution Vector")
+            fev, top_layers = compute_function_execution_vector(mean_activations, 
+                indirect_effect, model, 
+                model_config=model_config, n_top_layers=n_top_layers,
+                exclude_last_layer=exclude_last_layer,
+            )
     
     # Run Fv Evaluation
+    ## per layer eval
     if isinstance(eval_edit_layer, int):
         print(f"Running ZS Eval with edit_layer={eval_edit_layer}")
         set_seed(seed)
@@ -194,39 +230,78 @@ if __name__ == "__main__":
             pred_dir = f"{save_path_root}/preds"
             os.makedirs(pred_dir, exist_ok=True)
             pred_filepath = f"{pred_dir}/{model_config['name_or_path'].replace('/', '_')}_ZS_intervention_layer{eval_edit_layer}.txt"
-            zs_results, mlp_O_Fv = n_shot_eval(dataset=dataset, intervention_vector=fv, edit_layer=eval_edit_layer, n_shots=0,
-                model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
-                generate_str=generate_str, metric=metric, pred_filepath=pred_filepath, 
-                prefixes=prefixes, separators=separators, fv_intervention=fv_intervention,
-                mlp_layer=mlp_layer)
+            if intervention_type == 'fv':
+                zs_results, mlp_O_Fv = n_shot_eval(dataset=dataset, intervention_vector=fv, 
+                    edit_layer=eval_edit_layer, n_shots=0,
+                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
+                    generate_str=generate_str, metric=metric, pred_filepath=pred_filepath, 
+                    prefixes=prefixes, separators=separators, fv_intervention=fv_intervention,
+                    mlp_layer=mlp_layer
+                )
+            elif intervention_type == 'mlp_O':
+                zs_results = n_shot_eval(dataset=dataset, intervention_vector=fev, 
+                    edit_layer=eval_edit_layer, n_shots=0,
+                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
+                    generate_str=generate_str, metric=metric, pred_filepath=pred_filepath, 
+                    prefixes=prefixes, separators=separators, intervention_type='mlp_O',
+                )
         else:
-            zs_results, mlp_O_Fv = n_shot_eval(dataset=dataset, intervention_vector=fv, edit_layer=eval_edit_layer, n_shots=0,
-                model=model, model_config=model_config, tokenizer=tokenizer, 
-                filter_set=filter_set, prefixes=prefixes, separators=separators,
-                fv_intervention=fv_intervention, mlp_layer=mlp_layer)
+            if intervention_type == 'fv':
+                zs_results, mlp_O_Fv = n_shot_eval(dataset=dataset, intervention_vector=fv, 
+                    edit_layer=eval_edit_layer, n_shots=0,
+                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                    filter_set=filter_set, prefixes=prefixes, separators=separators,
+                    fv_intervention=fv_intervention, mlp_layer=mlp_layer)
+            elif intervention_type == 'mlp_O':
+                zs_results = n_shot_eval(dataset=dataset, intervention_vector=fev, 
+                    edit_layer=eval_edit_layer, n_shots=0,
+                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                    filter_set=filter_set, prefixes=prefixes, separators=separators,
+                    intervention_type='mlp_O',
+                )
           
         print(f"Running {n_shots}-Shot Shuffled Eval")
         set_seed(seed)
         if generate_str:
-            pred_filepath = f"{save_path_root}/preds/{model_config['name_or_path'].replace('/', '_')}_{n_shots}shots_shuffled_intervention_layer{eval_edit_layer}.txt"
-            fs_shuffled_results, mlp_O_Fv = n_shot_eval(dataset=dataset, intervention_vector=fv, edit_layer=eval_edit_layer, n_shots=n_shots, 
-                model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set, 
-                shuffle_labels=True, generate_str=generate_str, metric=metric, 
-                pred_filepath=pred_filepath, prefixes=prefixes, separators=separators,
-                fv_intervention=fv_intervention, mlp_layer=mlp_layer)
+            pred_filepath = f"{save_path_root}/preds/{model_config['name_or_path'].replace('/', '_')}" + \
+                f"_{n_shots}shots_shuffled_intervention_layer{eval_edit_layer}.txt"
+            if intervention_type == 'fv':
+                fs_shuffled_results, mlp_O_Fv = n_shot_eval(dataset=dataset, intervention_vector=fv,
+                    edit_layer=eval_edit_layer, n_shots=n_shots, 
+                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set, 
+                    shuffle_labels=True, generate_str=generate_str, metric=metric, 
+                    pred_filepath=pred_filepath, prefixes=prefixes, separators=separators,
+                    fv_intervention=fv_intervention, mlp_layer=mlp_layer)
+            elif intervention_type == 'mlp_O':
+                fs_shuffled_results = n_shot_eval(dataset=dataset, intervention_vector=fev, 
+                    edit_layer=eval_edit_layer, n_shots=n_shots, 
+                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set, 
+                    shuffle_labels=True, generate_str=generate_str, metric=metric, 
+                    pred_filepath=pred_filepath, prefixes=prefixes, separators=separators,
+                    intervention_type='mlp_O',
+                )
         else:
-            fs_shuffled_results, mlp_O_Fv = n_shot_eval(
-                dataset=dataset, intervention_vector=fv, edit_layer=eval_edit_layer, n_shots=n_shots, 
-                model=model, model_config=model_config, tokenizer=tokenizer, 
-                filter_set=filter_set, shuffle_labels=True, prefixes=prefixes, 
-                separators=separators, mlp_layer=mlp_layer
-            )
+            if intervention_type == 'fv':
+                fs_shuffled_results, mlp_O_Fv = n_shot_eval(
+                    dataset=dataset, intervention_vector=fv, edit_layer=eval_edit_layer, n_shots=n_shots, 
+                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                    filter_set=filter_set, shuffle_labels=True, prefixes=prefixes, 
+                    separators=separators, fv_intervention=fv_intervention, mlp_layer=mlp_layer, 
+                )
+            elif intervention_type == 'mlp_O':
+                fs_shuffled_results = n_shot_eval(
+                    dataset=dataset, intervention_vector=fev, edit_layer=eval_edit_layer, n_shots=n_shots, 
+                    model=model, model_config=model_config, tokenizer=tokenizer, 
+                    filter_set=filter_set, shuffle_labels=True, prefixes=prefixes, 
+                    separators=separators, intervention_type='mlp_O',
+                )
 
         zs_results_file_suffix = f'_{fv_intervention}_editlayer_{eval_edit_layer}.json'  
         fs_shuffled_results_file_suffix = f'_{fv_intervention}_editlayer_{eval_edit_layer}.json' 
         mlp_O_Fv_file_suffix = f'_{fv_intervention}_editlayer_{eval_edit_layer}.pt'
-        
-    else: # sweep over layers 
+    
+    ## sweep over layers eval
+    else: 
         print(f"Running sweep over layers {eval_edit_layer}")
         zs_results = {}
         fs_shuffled_results = {}
@@ -235,45 +310,93 @@ if __name__ == "__main__":
             set_seed(seed)
             # zero shot 
             if generate_str:
-                zs_results[edit_layer], mlp_O_Fv[edit_layer] = n_shot_eval(dataset=dataset,
-                    intervention_vector=fv, edit_layer=edit_layer, n_shots=0, 
-                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
-                    generate_str=generate_str, metric=metric, prefixes=prefixes, separators=separators,
-                    fv_intervention=fv_intervention, mlp_layer=mlp_layer)
+                if intervention_type == 'fv':
+                    zs_results[edit_layer], mlp_O_Fv[edit_layer] = n_shot_eval(dataset=dataset,
+                        intervention_vector=fv, edit_layer=edit_layer, n_shots=0, 
+                        model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
+                        generate_str=generate_str, metric=metric, prefixes=prefixes, separators=separators,
+                        fv_intervention=fv_intervention, mlp_layer=mlp_layer)
+                elif intervention_type == 'mlp_O':
+                    zs_results[edit_layer] = n_shot_eval(dataset=dataset,
+                        intervention_vector=fev, edit_layer=edit_layer, n_shots=0, 
+                        model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
+                        generate_str=generate_str, metric=metric, prefixes=prefixes, separators=separators,
+                        intervention_type='mlp_O',
+                    )
             else:
-                zs_results[edit_layer], mlp_O_Fv[edit_layer] = n_shot_eval(dataset=dataset,
-                    intervention_vector=fv, edit_layer=edit_layer, n_shots=0, 
-                    prefixes=prefixes, separators=separators,
-                    model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
-                    fv_intervention=fv_intervention, mlp_layer=mlp_layer)
+                if intervention_type == 'fv':
+                    zs_results[edit_layer], mlp_O_Fv[edit_layer] = n_shot_eval(dataset=dataset,
+                        intervention_vector=fv, edit_layer=edit_layer, n_shots=0, 
+                        prefixes=prefixes, separators=separators,
+                        model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
+                        fv_intervention=fv_intervention, mlp_layer=mlp_layer)
+                elif intervention_type == 'mlp_O':
+                    zs_results[edit_layer] = n_shot_eval(dataset=dataset,
+                        intervention_vector=fev, edit_layer=edit_layer, n_shots=0, 
+                        prefixes=prefixes, separators=separators,
+                        model=model, model_config=model_config, tokenizer=tokenizer, filter_set=filter_set,
+                        intervention_type='mlp_O',
+                    )
             set_seed(seed)
             # few shots with shuffled labels 
             if generate_str:
-                fs_shuffled_results[edit_layer], mlp_O_Fv[edit_layer] = n_shot_eval(
-                    dataset=dataset, intervention_vector=fv, edit_layer=edit_layer, n_shots=n_shots, 
-                    model=model, model_config=model_config, tokenizer=tokenizer, 
-                    filter_set = filter_set, generate_str=generate_str, metric=metric, 
-                    shuffle_labels=True, prefixes=prefixes, separators=separators,
-                    fv_intervention=fv_intervention, mlp_layer=mlp_layer)
+                if intervention_type == 'fv':
+                    fs_shuffled_results[edit_layer], mlp_O_Fv[edit_layer] = n_shot_eval(
+                        dataset=dataset, intervention_vector=fv, edit_layer=edit_layer, n_shots=n_shots, 
+                        model=model, model_config=model_config, tokenizer=tokenizer, 
+                        filter_set = filter_set, generate_str=generate_str, metric=metric, 
+                        shuffle_labels=True, prefixes=prefixes, separators=separators,
+                            fv_intervention=fv_intervention, mlp_layer=mlp_layer)
+                elif intervention_type == 'mlp_O':
+                    fs_shuffled_results[edit_layer] = n_shot_eval(
+                        dataset=dataset, intervention_vector=fev, edit_layer=edit_layer, n_shots=n_shots, 
+                        model=model, model_config=model_config, tokenizer=tokenizer, 
+                        filter_set = filter_set, generate_str=generate_str, metric=metric,
+                        shuffle_labels=True, prefixes=prefixes, separators=separators,
+                        intervention_type='mlp_O',
+                    )
             else:
-                fs_shuffled_results[edit_layer], mlp_O_Fv[edit_layer] = n_shot_eval(
-                    dataset=dataset, intervention_vector=fv, edit_layer=edit_layer, n_shots=n_shots, 
-                    model=model, model_config=model_config, tokenizer=tokenizer, 
-                    filter_set = filter_set, shuffle_labels=True, prefixes=prefixes, 
-                    separators=separators, fv_intervention=fv_intervention, mlp_layer=mlp_layer)
-        
-        zs_results_file_suffix = f'_{fv_intervention}_layer_sweep.json'
-        fs_shuffled_results_file_suffix = f'_{fv_intervention}_layer_sweep.json'
-        mlp_O_Fv_file_suffix = f'_{fv_intervention}_layer_sweep.pt'
+                if intervention_type == 'fv':
+                    fs_shuffled_results[edit_layer], mlp_O_Fv[edit_layer] = n_shot_eval(
+                        dataset=dataset, intervention_vector=fv, edit_layer=edit_layer, n_shots=n_shots, 
+                        model=model, model_config=model_config, tokenizer=tokenizer, 
+                        filter_set = filter_set, shuffle_labels=True, prefixes=prefixes, 
+                        separators=separators, fv_intervention=fv_intervention, mlp_layer=mlp_layer)
+                elif intervention_type == 'mlp_O':
+                    fs_shuffled_results[edit_layer] = n_shot_eval(
+                        dataset=dataset, intervention_vector=fev, edit_layer=edit_layer, n_shots=n_shots, 
+                        model=model, model_config=model_config, tokenizer=tokenizer, 
+                        filter_set = filter_set, shuffle_labels=True, prefixes=prefixes, 
+                        separators=separators, intervention_type='mlp_O',
+                    )
+        if intervention_type == 'fv':
+            zs_results_file_suffix = f'_{fv_intervention}_layer_sweep.json'
+            fs_shuffled_results_file_suffix = f'_{fv_intervention}_layer_sweep.json'
+            mlp_O_Fv_file_suffix = f'_{fv_intervention}_layer_sweep.pt'
+        elif intervention_type == 'mlp_O':
+            zs_results_file_suffix = f'_layer_sweep.json'
+            fs_shuffled_results_file_suffix = f'_layer_sweep.json'
+            mlp_O_Fv_file_suffix = f'_layer_sweep.pt'
        
     ## Save results to files
     if universal_set:
         head_name = 'universal_heads'
     else:
         head_name = 'task_specific_heads'
+    if exclude_last_layer:
+        folder_tail = 'no_last_layer'
+    else:
+        folder_tail = ''
     
-    ## Create directories if they don't exist
-    results_dir = make_valid_path_name(f'{save_path_root}/Fv_eval_{head_name}')
+    ## Create directories if they don't exist for storing eval results 
+    if intervention_type == 'fv':
+        results_dir = make_valid_path_name(
+            f'{save_path_root}/{intervention_type}_{n_top_heads}/eval_{head_name}'
+        )
+    elif intervention_type == 'mlp_O':
+        results_dir = make_valid_path_name(
+            f'{save_path_root}/{intervention_type}_{n_top_layers}/eval_{head_name}_{folder_tail}'
+        )
     os.makedirs(results_dir, exist_ok=True)
 
     zs_results_file_name = make_valid_path_name(f'{results_dir}/zs_results{zs_results_file_suffix}')
@@ -281,17 +404,21 @@ if __name__ == "__main__":
     with open(zs_results_file_name, 'w') as results_file:
         json.dump(zs_results, results_file, indent=2)
 
-    fs_shuffled_results_file_name = make_valid_path_name(f'{results_dir}/fs_shuffled_results{fs_shuffled_results_file_suffix}')
+    fs_shuffled_results_file_name = make_valid_path_name(
+        f'{results_dir}/fs_shuffled_results{fs_shuffled_results_file_suffix}'
+    )
     args.fs_shuffled_results_file_name = fs_shuffled_results_file_name
     with open(fs_shuffled_results_file_name, 'w') as results_file:
         json.dump(fs_shuffled_results, results_file, indent=2)
 
-    ## Save mean of mlp_out across eidt layer 
+    ## Save mean of mlp_out across eidt layer (for intervention_type == 'fv')
     args.mlp_O_Fv_path = make_valid_path_name(f'{results_dir}/mlp_O_{mlp_layer}_Fv'
         + mlp_O_Fv_file_suffix)
     torch.save(mlp_O_Fv, args.mlp_O_Fv_path)
 
-    if compute_baseline:
+    # Baseline (varying n_shots)
+    baseline_file_name = f'{save_path_root}/fs_results_varying_nshots.json'
+    if compute_baseline and not os.path.exists(baseline_file_name):
         print(f"Computing model baseline results for {n_shots}-shots")
         baseline_results = compute_dataset_baseline(dataset, model, model_config, tokenizer, 
             n_shots=n_shots, seed=seed, prefixes=prefixes, separators=separators,
@@ -303,8 +430,9 @@ if __name__ == "__main__":
             json.dump(baseline_results, results_file, indent=2)
 
     # Write fv args to file
-    args_file_name = make_valid_path_name(f'{save_path_root}/fv_eval_args_{fv_intervention}.txt')
-    with open(args_file_name, 'w') as arg_file:
+    arg_file_name = f'eval_args.txt'
+    arg_file_path = make_valid_path_name(f'{results_dir}/{arg_file_name}')
+    with open(arg_file_path, 'w') as arg_file:
         json.dump(args.__dict__, arg_file, indent=2)
 
     

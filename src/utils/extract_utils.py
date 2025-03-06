@@ -12,7 +12,8 @@ from .eval_utils import *
 
 
 # Attention Activations
-def gather_attn_activations(prompt_data, layers, dummy_labels, model, tokenizer, model_config):
+def gather_activations(prompt_data, layers, dummy_labels, 
+    model, tokenizer, model_config, act_source="fv"):
     """
     Collects activations for an ICL prompt 
 
@@ -22,6 +23,9 @@ def gather_attn_activations(prompt_data, layers, dummy_labels, model, tokenizer,
     dummy_labels: labels and indices for a baseline prompt with the same number of example pairs
     model: huggingface model
     tokenizer: huggingface tokenizer
+    act_source: type of activations to use for intervention
+        "fv": use attention head activations
+        "mlp_O": use MLP output activations
 
     Returns:
     td: tracedict with stored activations
@@ -31,22 +35,31 @@ def gather_attn_activations(prompt_data, layers, dummy_labels, model, tokenizer,
     
     # Get sentence and token labels
     query = prompt_data['query_target']['input']
-    token_labels, prompt_string = get_token_meta_labels(prompt_data, tokenizer, query, prepend_bos=model_config['prepend_bos'])
+    token_labels, prompt_string = get_token_meta_labels(prompt_data, 
+        tokenizer, query, prepend_bos=model_config['prepend_bos'])
     sentence = [prompt_string]
 
     inputs = tokenizer(sentence, return_tensors='pt').to(model.device)
     idx_map, idx_avg = compute_duplicated_labels(token_labels, dummy_labels)
 
     # Access Activations 
-    with TraceDict(model, layers=layers, retain_input=True, retain_output=False) as td:                
-        model(**inputs) # batch_size x n_tokens x vocab_size, only want last token prediction
+    if act_source == "fv":
+        with TraceDict(model, layers=layers, retain_input=True, retain_output=False) as td:                
+            model(**inputs) # batch_size x n_tokens x vocab_size, only want last token prediction
+    elif act_source == "mlp_O":
+        with TraceDict(model, layers=layers, retain_input=False, retain_output=True) as td:                
+            model(**inputs) # batch_size x n_tokens x vocab_size, only want last token prediction
 
     return td, idx_map, idx_avg
 
-def get_mean_head_activations(dataset, model, model_config, tokenizer, n_icl_examples = 10, N_TRIALS = 100, shuffle_labels=False, prefixes=None, separators=None, filter_set=None):
-    """
-    Computes the average activations for each attention head in the model, where multi-token phrases are condensed into a single slot through averaging.
 
+def get_mean_head_activations(dataset, model, model_config, tokenizer,
+    n_icl_examples = 10, N_TRIALS = 100, shuffle_labels=False, 
+    prefixes=None, separators=None, filter_set=None,
+):
+    """
+    Computes the average activations for 
+        each attention head: multi-token phrases are condensed into a single slot through averaging.
     Parameters: 
     dataset: ICL dataset
     model: huggingface model
@@ -61,18 +74,24 @@ def get_mean_head_activations(dataset, model, model_config, tokenizer, n_icl_exa
 
     Returns:
     mean_activations: avg activation of each attention head in the model taken across n_trials ICL prompts
+        'layer n_heads n_filtered_tokens head_hidden_dim'
     """
     def split_activations_by_head(activations, model_config):
-        new_shape = activations.size()[:-1] + (model_config['n_heads'], model_config['resid_dim']//model_config['n_heads']) # split by head: + (n_attn_heads, hidden_size/n_attn_heads)
+        new_shape = activations.size()[:-1] + (
+            model_config['n_heads'], model_config['resid_dim']//model_config['n_heads']
+        ) # split by head: + (n_attn_heads, hidden_size/n_attn_heads)
         activations = activations.view(*new_shape)  # (batch_size, n_tokens, n_heads, head_hidden_dim)
         return activations
     
     n_test_examples = 1
     if prefixes is not None and separators is not None:
-        dummy_labels = get_dummy_token_labels(n_icl_examples, tokenizer=tokenizer, prefixes=prefixes, separators=separators, model_config=model_config)
+        dummy_labels = get_dummy_token_labels(n_icl_examples, tokenizer=tokenizer, prefixes=prefixes, 
+            separators=separators, model_config=model_config)
     else:
         dummy_labels = get_dummy_token_labels(n_icl_examples, tokenizer=tokenizer, model_config=model_config)
-    activation_storage = torch.zeros(N_TRIALS, model_config['n_layers'], model_config['n_heads'], len(dummy_labels), model_config['resid_dim']//model_config['n_heads'])
+    
+    activation_storage = torch.zeros(N_TRIALS, model_config['n_layers'], model_config['n_heads'], 
+        len(dummy_labels), model_config['resid_dim']//model_config['n_heads'])
 
     if filter_set is None:
         filter_set = np.arange(len(dataset['valid']))
@@ -88,21 +107,103 @@ def get_mean_head_activations(dataset, model, model_config, tokenizer, n_icl_exa
                                                     shuffle_labels=shuffle_labels, prefixes=prefixes, separators=separators)
         else:
             prompt_data = word_pairs_to_prompt_data(word_pairs, query_target_pair=word_pairs_test, prepend_bos_token=prepend_bos, shuffle_labels=shuffle_labels)
-        activations_td,idx_map,idx_avg = gather_attn_activations(prompt_data=prompt_data, 
-                                                            layers = model_config['attn_hook_names'], 
-                                                            dummy_labels=dummy_labels, 
-                                                            model=model, 
-                                                            tokenizer=tokenizer, 
-                                                            model_config=model_config)
         
-        stack_initial = torch.vstack([split_activations_by_head(activations_td[layer].input, model_config) for layer in model_config['attn_hook_names']]).permute(0,2,1,3)
-        stack_filtered = stack_initial[:,:,list(idx_map.keys())]
+        activations_td,idx_map,idx_avg = gather_activations(prompt_data=prompt_data, 
+            layers = model_config['attn_hook_names'],
+            dummy_labels=dummy_labels, 
+            model=model, 
+            tokenizer=tokenizer, 
+            model_config=model_config)
+        
+        stack_initial = torch.vstack(
+            [split_activations_by_head(
+                activations_td[layer].input, model_config
+            ) for layer in model_config['attn_hook_names']]
+        ).permute(0,2,1,3) # 'layer n_tokens n_heads head_hidden_dim' -> 'layer n_heads n_tokens head_hidden_dim'
+       
+        # Average activations of multi-token words across all its tokens
+        stack_filtered = stack_initial[:, :, list(idx_map.keys())]
         for (i,j) in idx_avg.values():
-            stack_filtered[:,:,idx_map[i]] = stack_initial[:,:,i:j+1].mean(axis=2) # Average activations of multi-token words across all its tokens
+            stack_filtered[:,:,idx_map[i]] = stack_initial[:,:,i:j+1].mean(axis=2) 
         
-        activation_storage[n] = stack_filtered
+        activation_storage[n] = stack_filtered # 'n layer n_heads n_filtered_tokens head_hidden_dim'
 
-    mean_activations = activation_storage.mean(dim=0)
+    mean_activations = activation_storage.mean(dim=0) # 'layer n_heads n_filtered_tokens head_hidden_dim'
+    return mean_activations
+
+def get_mean_mlp_O_activations(dataset, model, model_config, tokenizer,
+    n_icl_examples = 10, N_TRIALS = 100, shuffle_labels=False, 
+    prefixes=None, separators=None, filter_set=None,
+) -> torch.Tensor:
+    """
+    Computes the average activations for each layer's MLP output
+    Parameters: 
+    dataset: ICL dataset
+    model: huggingface model
+    model_config: contains model config information (n layers, n heads, etc.)
+    tokenizer: huggingface tokenizer
+    n_icl_examples: Number of shots in each in-context prompt
+    N_TRIALS: Number of in-context prompts to average over
+    shuffle_labels: Whether to shuffle the ICL labels or not
+    prefixes: ICL template prefixes
+    separators: ICL template separators
+    filter_set: whether to only include samples the model gets correct via ICL
+
+    Returns:
+    mean_activations: avg activation of mlp outputs of each layer 
+        in the model taken across n_trials ICL prompts
+        shape: 'layer resid_dim'
+    """
+
+    n_test_examples = 1
+    if prefixes is not None and separators is not None:
+        dummy_labels = get_dummy_token_labels(n_icl_examples, tokenizer=tokenizer, prefixes=prefixes, 
+            separators=separators, model_config=model_config)
+    else:
+        dummy_labels = get_dummy_token_labels(n_icl_examples, tokenizer=tokenizer, model_config=model_config)
+    
+    activation_storage = torch.zeros(N_TRIALS, model_config['n_layers'], 
+        len(dummy_labels), model_config['resid_dim'], 
+    )
+
+    if filter_set is None:
+        filter_set = np.arange(len(dataset['valid']))
+
+    # If the model already prepends a bos token by default, we don't want to add one
+    prepend_bos =  False if model_config['prepend_bos'] else True
+
+    for n in range(N_TRIALS):
+        word_pairs = dataset['train'][np.random.choice(len(dataset['train']),n_icl_examples, replace=False)]
+        word_pairs_test = dataset['valid'][np.random.choice(filter_set,n_test_examples, replace=False)]
+        if prefixes is not None and separators is not None:
+            prompt_data = word_pairs_to_prompt_data(word_pairs, query_target_pair=word_pairs_test, 
+                prepend_bos_token=prepend_bos, 
+                shuffle_labels=shuffle_labels, prefixes=prefixes, separators=separators)
+        else:
+            prompt_data = word_pairs_to_prompt_data(word_pairs, query_target_pair=word_pairs_test,
+                prepend_bos_token=prepend_bos, shuffle_labels=shuffle_labels)
+        
+        activations_td, idx_map, idx_avg = gather_activations(prompt_data=prompt_data, 
+            layers = model_config['mlp_hook_names'], 
+            dummy_labels=dummy_labels, 
+            model=model, 
+            tokenizer=tokenizer, 
+            model_config=model_config, 
+            act_source="mlp_O")
+        
+        stack_initial = torch.vstack(
+            [activations_td[layer].output for layer in model_config['mlp_hook_names']]
+        ) # 'layer n_tokens resid_dim'
+       
+        # Average activations of multi-token words across all its tokens
+        stack_filtered = stack_initial[:, list(idx_map.keys())]
+        for (i, j) in idx_avg.values():
+            stack_filtered[:, idx_map[i]] = stack_initial[:, i:j+1].mean(axis=1) 
+            # 'layer n_tokens resid_dim' -> 'layer n_filtered_tokens resid_dim'
+        
+        activation_storage[n] = stack_filtered # 'n(batch_size) layer n_filtered_tokens resid_dim'
+        
+    mean_activations = activation_storage.mean(dim=0) # 'layer n_filtered_tokens resid_dim'
     return mean_activations
 
 # Layer Activations
@@ -302,7 +403,71 @@ def prefix_matching_score(model, model_config, min_token_idx=1000, max_token_idx
     
     return score_per_head
 
-def compute_function_vector(mean_activations, indirect_effect, model, model_config, n_top_heads = 10, token_class_idx=-1):
+def compute_function_execution_vector(mean_activations, indirect_effect, 
+    model, model_config,
+    n_top_layers = 10, token_class_idx=-1, exclude_last_layer=False):
+    """
+        Computes a "function executionvector" that executes the task observed 
+            in ICL examples used for downstream intervention.
+        
+        Parameters:
+        mean_activations: tensor of size (Layers, Tokens, resid_dim)
+            containing the average activation of each layer's mlp output for a particular task
+        indirect_effect: tensor of size (N, Layers, class(optional)) 
+            containing the indirect_effect of each layer's mlp output across N trials
+        model: huggingface model being used
+        model_config: contains model config information (n layers, n heads, etc.)
+        n_top_layers: The number of layers to use when computing the summed function execution vector
+        token_class_idx: int indicating which token class to use, -1 is default for last token computations
+
+        Returns:
+        function_exe_vector: vector representing the execution of a particular task 
+            ,sum of mean mlp outputs, shape '1 resid_dim'
+        top_layers: list of the top influential heads represented as tuples [(L,S), ...], 
+            (L=Layer, S=Avg. Indirect Effect Score)         
+    """
+    model_resid_dim = model_config['resid_dim']
+    assert model_resid_dim == mean_activations.shape[2]
+    assert model_config['n_layers'] == mean_activations.shape[0]
+    device = model.device
+
+    li_dims = len(indirect_effect.shape)
+    
+    if li_dims == 2 and token_class_idx == -1:
+        mean_indirect_effect = indirect_effect.mean(dim=0)
+    else:
+        assert(li_dims == 3)
+        mean_indirect_effect = indirect_effect[:,:,token_class_idx].mean(dim=0) # Subset to token class of interest
+
+    # Compute Top Influential Layers (L)
+    h_shape = mean_indirect_effect.shape 
+    topk_vals, topk_inds  = torch.topk(mean_indirect_effect.view(-1), 
+        k=n_top_layers, largest=True)
+    top_ls = list(zip(*np.unravel_index(topk_inds, h_shape), 
+        [round(x.item(),4) for x in topk_vals])) # [(L,S), ...]
+    if exclude_last_layer: 
+        print("Exclude the last layer")
+        top_ls = [(L, S) for (L, S) in top_ls if L != model_config['n_layers']-1]
+    
+    # Take the top n_top_layers after filtering
+    top_layers = top_ls[:n_top_layers] # [(L,S), ...] of length n_top_layers
+    print("top_layers + IDE: ", top_layers)
+
+    # Compute Function Exe Vector as sum of influential layers
+    function_exe_vector = torch.zeros(model_resid_dim).to(device)
+    T = -1 # Intervention & values taken from last token
+
+    for L,_ in top_layers: #top_layers [(L,S), ...] of length n_top_layers
+        assert mean_activations[L, T].shape == (model_resid_dim,)
+        function_exe_vector += mean_activations[L, T].to(device)
+    
+    function_exe_vector = function_exe_vector.to(model.dtype)
+    function_exe_vector = function_exe_vector.reshape(1, model_resid_dim)
+
+    return function_exe_vector, top_layers 
+
+def compute_function_vector(mean_activations, indirect_effect, model, model_config,
+    n_top_heads = 10, token_class_idx=-1):
     """
         Computes a "function vector" vector that communicates the task observed in ICL examples used for downstream intervention.
         

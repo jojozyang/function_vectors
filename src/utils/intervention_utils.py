@@ -12,18 +12,66 @@ def get_module(model, name):
             return m
     raise LookupError(name)
 
-
-def replace_activation_w_avg(layer_head_token_pairs, avg_activations, model, model_config, idx_map, batched_input=False, last_token_only=False):
+def replace_mlp_O_activation_w_avg(layer_token_pairs, avg_activations, 
+    idx_map, last_token_only=False):
     """
     An intervention function for replacing activations with a computed average value.
-    This function replaces the output of one (or several) attention head(s) with a pre-computed average value 
-    (usually taken from another set of runs with a particular property).
-    The batched_input flag is used for systematic interventions where we are sweeping over all attention heads for a given (layer,token)
-    The last_token_only flag is used for interventions where we only intervene on the last token (such as zero-shot or concept-naming)
+    This function replaces the output of one layers's mlp outputs with a pre-computed average value 
+    (usually taken from another set of runs with a particular property). #TODO one (or several) 
+    The last_token_only flag is used for interventions where we only intervene on 
+        the last token (such as zero-shot or concept-naming)
+    
+    Parameters:
+    layer_token_pairs: list of tuple each containing 
+        a layer index and token index [(L, T), ...] 
+    avg_activations: torch tensor of the average mlp output activations (across ICL prompts) 
+        for each layer of the model.
+    idx_map: dict mapping prompt label indices to ground truth label indices #TODO
+    last_token_only: whether our intervention is only at the last token
+
+    Returns: 
+    rep_act: A function that specifies how to replace activations with an average 
+        when given a hooked pytorch module.
+    """
+    edit_layers = [x[0] for x in layer_token_pairs]
+
+    def rep_act(output, layer_name):
+        current_layer = int(layer_name.split('.')[2])
+        if current_layer in edit_layers: 
+            if last_token_only:
+            # Patch activations only at the last token for interventions like
+                for (layer, token_n) in layer_token_pairs:
+                    if layer == current_layer:
+                        output[-1, -1] = avg_activations[layer, idx_map[token_n]]
+            else:
+            # Patch activations into baseline sentence found at index, -1 of the batch (targeted & multi-token patching)
+                for (layer, token_n) in layer_token_pairs:
+                    if layer == current_layer:
+                        output[-1, token_n] = avg_activations[layer,idx_map[token_n]]
+
+            return output 
+        else:
+            return output
+        
+    return rep_act
+
+def replace_activation_w_avg(layer_head_token_pairs, avg_activations, 
+    model, model_config, idx_map, batched_input=False, last_token_only=False):
+    """
+    An intervention function for replacing activations with a computed average value.
+    This function replaces the output of one (or several) attention head(s) 
+        with a pre-computed average value 
+        (usually taken from another set of runs with a particular property). 
+    The batched_input flag is used for systematic interventions where we are sweeping 
+        over all attention heads for a given (layer,token)
+    The last_token_only flag is used for interventions where we only intervene on 
+        the last token (such as zero-shot or concept-naming)
 
     Parameters:
-    layer_head_token_pairs: list of tuple triplets each containing a layer index, head index, and token index [(L,H,T), ...]
-    avg_activations: torch tensor of the average activations (across ICL prompts) for each attention head of the model.
+    layer_head_token_pairs: list of tuple triplets each containing 
+        a layer index, head index, and token index [(L,H,T), ...] 
+    avg_activations: torch tensor of the average activations (across ICL prompts) 
+        for each attention head of the model.
     model: huggingface model
     model_config: contains model config information (n layers, n heads, etc.)
     idx_map: dict mapping prompt label indices to ground truth label indices
@@ -31,7 +79,8 @@ def replace_activation_w_avg(layer_head_token_pairs, avg_activations, model, mod
     last_token_only: whether our intervention is only at the last token
 
     Returns: 
-    rep_act: A function that specifies how to replace activations with an average when given a hooked pytorch module.
+    rep_act: A function that specifies how to replace activations with an average 
+        when given a hooked pytorch module.
     """
     edit_layers = [x[0] for x in layer_head_token_pairs]
 
@@ -43,12 +92,15 @@ def replace_activation_w_avg(layer_head_token_pairs, avg_activations, model, mod
             
             # Determine shapes for intervention
             original_shape = inputs.shape
-            new_shape = inputs.size()[:-1] + (model_config['n_heads'], model_config['resid_dim']//model_config['n_heads']) # split by head: + (n_attn_heads, hidden_size/n_attn_heads)
+            new_shape = inputs.size()[:-1] + (
+                model_config['n_heads'], model_config['resid_dim']//model_config['n_heads']
+            ) # split by head: + (n_attn_heads, hidden_size/n_attn_heads)
             inputs = inputs.view(*new_shape) # inputs shape: (batch_size , tokens (n), heads, hidden_dim)
             
             # Perform Intervention:
             if batched_input:
-            # Patch activations from avg activations into baseline sentences (i.e. n_head baseline sentences being modified in this case)
+            # Patch activations from avg activations into baseline sentences 
+            # (i.e. n_head baseline sentences being modified in this case)
                 for i in range(model_config['n_heads']):
                     layer, head_n, token_n = layer_head_token_pairs[i]
                     inputs[i, token_n, head_n] = avg_activations[layer, head_n, idx_map[token_n]]

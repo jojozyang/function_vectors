@@ -11,7 +11,10 @@ from utils.model_utils import *
 from utils.extract_utils import *
 
 
-def activation_replacement_per_class_intervention(prompt_data, avg_activations, dummy_labels, model, model_config, tokenizer, last_token_only=True):
+def activation_replacement_per_class_intervention(prompt_data, avg_activations, 
+    dummy_labels, model, model_config, tokenizer, last_token_only=True,
+    act_source="fv",
+):
     """
     Experiment to determine top intervention locations through avg activation replacement. 
     Performs a systematic sweep over attention heads (layer, head) to track their causal influence on probs of key tokens.
@@ -23,10 +26,15 @@ def activation_replacement_per_class_intervention(prompt_data, avg_activations, 
     model: huggingface model
     model_config: contains model config information (n layers, n heads, etc.)
     tokenizer: huggingface tokenizer
-    last_token_only: If True, only computes indirect effect for heads at the final token position. If False, computes indirect_effect for heads for all token classes
+    last_token_only: If True, only computes indirect effect for heads at the final token position. 
+        If False, computes indirect_effect for heads for all token classes
+    act_source: type of activations to use for intervention
+        "fv": use attention head activations
+        "mlp_O": use MLP output activations
 
     Returns:   
-    indirect_effect_storage: torch tensor containing the indirect_effect of each head for each token class.
+    indirect_effect_storage: torch tensor containing the indirect_effect of each head 
+        for each token class.
     """
     device = model.device
 
@@ -57,58 +65,94 @@ def activation_replacement_per_class_intervention(prompt_data, avg_activations, 
     else:
         token_classes = ['demonstration', 'label', 'separator', 'predictive', 'structural','end_of_example', 
                         'query_demonstration', 'query_structural', 'query_separator', 'query_predictive']
-        token_classes_regex = ['demonstration_[\d]{1,}_token', 'demonstration_[\d]{1,}_label_token', 'separator_token', 'predictive_token', 'structural_token','end_of_example_token', 
-                            'query_demonstration_token', 'query_structural_token', 'query_separator_token', 'query_predictive_token']
+        token_classes_regex = ['demonstration_[\d]{1,}_token', 'demonstration_[\d]{1,}_label_token',
+                            'separator_token', 'predictive_token', 'structural_token','end_of_example_token', 
+                            'query_demonstration_token', 'query_structural_token', 'query_separator_token', 
+                            'query_predictive_token']
     
-
-    indirect_effect_storage = torch.zeros(model_config['n_layers'], model_config['n_heads'],len(token_classes))
-
     # Clean Run of Baseline:
     clean_output = model(**inputs).logits[:,-1,:]
     clean_probs = torch.softmax(clean_output[0], dim=-1)
 
+    if act_source == "fv":
+        indirect_effect_storage = torch.zeros(model_config['n_layers'], 
+            model_config['n_heads'], len(token_classes))
     # For every layer, head, token combination perform the replacement & track the change in meaningful tokens
-    for layer in range(model_config['n_layers']):
-        head_hook_layer = [model_config['attn_hook_names'][layer]]
-        
-        for head_n in range(model_config['n_heads']):
-            for i,(token_class, class_regex) in enumerate(zip(token_classes, token_classes_regex)):
+        for layer in range(model_config['n_layers']):
+            head_hook_layer = [model_config['attn_hook_names'][layer]]
+            
+            for head_n in range(model_config['n_heads']):
+                for i,(token_class, class_regex) in enumerate(zip(token_classes, token_classes_regex)):
+                    reg_class_match = re.compile(f"^{class_regex}$")
+                    class_token_inds = [x[0] for x in token_labels if reg_class_match.match(x[2])]
+
+                    intervention_locations = [(layer, head_n, token_n) for token_n in class_token_inds]
+                    intervention_fn = replace_activation_w_avg(layer_head_token_pairs=intervention_locations, 
+                        avg_activations=avg_activations, 
+                        model=model, model_config=model_config,
+                        batched_input=False, idx_map=idx_map, last_token_only=last_token_only
+                    )
+                    with TraceDict(model, layers=head_hook_layer, edit_output=intervention_fn) as td:                
+                        output = model(**inputs).logits[:,-1,:] # batch_size x n_tokens x vocab_size, only want last token prediction
+                    
+                    # TRACK probs of tokens of interest
+                    intervention_probs = torch.softmax(output, dim=-1) # convert to probability distribution
+                    indirect_effect_storage[layer,head_n,i] = (intervention_probs-clean_probs).index_select(
+                        1, torch.LongTensor(token_id_of_interest).to(device).squeeze()
+                    ).squeeze() # shape: 'layer head n_token_of_interest'
+
+    elif act_source == "mlp_O":
+        print("Indirect Effect for MLP Outputs")
+        indirect_effect_storage = torch.zeros(model_config['n_layers'], 
+            len(token_classes)
+        )
+        for layer in range(model_config['n_layers']):
+            hook_layer = [model_config['mlp_hook_names'][layer]]
+            for i, (token_class, class_regex) in enumerate(zip(token_classes, token_classes_regex)):
                 reg_class_match = re.compile(f"^{class_regex}$")
                 class_token_inds = [x[0] for x in token_labels if reg_class_match.match(x[2])]
 
-                intervention_locations = [(layer, head_n, token_n) for token_n in class_token_inds]
-                intervention_fn = replace_activation_w_avg(layer_head_token_pairs=intervention_locations, 
+                intervention_locations = [(layer, token_n) for token_n in class_token_inds]
+                intervention_fn = replace_mlp_O_activation_w_avg(layer_token_pairs=intervention_locations, 
                     avg_activations=avg_activations, 
-                    model=model, model_config=model_config,
-                    batched_input=False, idx_map=idx_map, last_token_only=last_token_only
+                    idx_map=idx_map, last_token_only=last_token_only,
                 )
-                with TraceDict(model, layers=head_hook_layer, edit_output=intervention_fn) as td:                
+                with TraceDict(model, layers=hook_layer, edit_output=intervention_fn) as td:                
                     output = model(**inputs).logits[:,-1,:] # batch_size x n_tokens x vocab_size, only want last token prediction
-                
-                # TRACK probs of tokens of interest
-                intervention_probs = torch.softmax(output, dim=-1) # convert to probability distribution
-                indirect_effect_storage[layer,head_n,i] = (intervention_probs-clean_probs).index_select(1, torch.LongTensor(token_id_of_interest).to(device).squeeze()).squeeze()
+                    
+                    #track probs of tokens of interest
+                    intervention_probs = torch.softmax(output, dim=-1) # convert to probability distribution
+                    indirect_effect_storage[layer, i] = (intervention_probs-clean_probs).index_select(
+                        1, torch.LongTensor(token_id_of_interest).to(device).squeeze()
+                    ).squeeze() # shape: 'layer n_token_of_interest'
 
     return indirect_effect_storage
 
 
-def compute_indirect_effect(dataset, mean_activations, model, model_config, tokenizer, n_shots=10, n_trials=25, last_token_only=True, prefixes=None, separators=None, filter_set=None):
+def compute_indirect_effect(dataset, mean_activations, model, model_config, 
+    tokenizer, n_shots=10, n_trials=25, last_token_only=True, prefixes=None, 
+    separators=None, filter_set=None, act_source="fv"):
     """
     Computes Indirect Effect of each head in the model
 
     Parameters:
     dataset: ICL dataset
-    mean_activations:
+    mean_activations: avg activations 
+        shape: 'n_layers n_heads n_filtered_tokens d_head' if act_source == "fv"
+        shape: 'n_layers n_filtered_tokens resid_dim' if act_source == "mlp_O"
     model: huggingface model
     model_config: contains model config information (n layers, n heads, etc.)
     tokenizer: huggingface tokenizer
     n_shots: Number of shots in each in-context prompt
     n_trials: Number of in-context prompts to average over
     last_token_only: If True, only computes Indirect Effect for heads at the final token position. If False, computes Indirect Effect for heads for all token classes
-
+    act_source: compute indirect effect using attention head or MLP output activations
+        "fv": use attention head activations
+        "mlp_O": use MLP output activations
 
     Returns:
-    indirect_effect: torch tensor of the indirect effect for each attention head in the model, size n_trials * n_layers * n_heads
+    indirect_effect: torch tensor of the indirect effect for each attention head in the model, 
+        shape: 'n_trials n_layers  n_heads'
     """
     n_test_examples = 1
 
@@ -121,9 +165,15 @@ def compute_indirect_effect(dataset, mean_activations, model, model_config, toke
     prepend_bos = False if model_config['prepend_bos'] else True
 
     if last_token_only:
-        indirect_effect = torch.zeros(n_trials,model_config['n_layers'], model_config['n_heads'])
+        if act_source == "fv":
+            indirect_effect = torch.zeros(n_trials,model_config['n_layers'], model_config['n_heads'])
+        elif act_source == "mlp_O":
+            indirect_effect = torch.zeros(n_trials,model_config['n_layers'])
     else:
-        indirect_effect = torch.zeros(n_trials,model_config['n_layers'], model_config['n_heads'],10) # have 10 classes of tokens
+        if act_source == "fv":
+            indirect_effect = torch.zeros(n_trials,model_config['n_layers'], model_config['n_heads'], 10) # have 10 classes of tokens
+        elif act_source == "mlp_O":
+            indirect_effect = torch.zeros(n_trials,model_config['n_layers'], 10)
 
     if filter_set is None:
         filter_set = np.arange(len(dataset['valid']))
@@ -139,10 +189,12 @@ def compute_indirect_effect(dataset, mean_activations, model, model_config, toke
                                                            shuffle_labels=True, prepend_bos_token=prepend_bos)
         
         ind_effects = activation_replacement_per_class_intervention(prompt_data=prompt_data_random, 
-                                                                    avg_activations = mean_activations, 
-                                                                    dummy_labels=dummy_gt_labels, 
-                                                                    model=model, model_config=model_config, tokenizer=tokenizer, 
-                                                                    last_token_only=last_token_only)
+            avg_activations = mean_activations, 
+            dummy_labels=dummy_gt_labels, 
+            model=model, model_config=model_config, tokenizer=tokenizer, 
+            last_token_only=last_token_only,
+            act_source=act_source,
+        )
         indirect_effect[i] = ind_effects.squeeze()
 
     return indirect_effect
@@ -162,10 +214,12 @@ if __name__ == "__main__":
     parser.add_argument('--test_split', help="Percentage corresponding to test set split size", required=False, default=0.3)
     parser.add_argument('--device', help='Device to run on',type=str, required=False, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--mean_activations_path', help='Path to mean activations file used for intervention', required=False, type=str, default=None)
-    parser.add_argument('--last_token_only', help='Whether to compute indirect effect for heads at only the final token position, or for all token classes', required=False, type=bool, default=True)
+    parser.add_argument('--last_token_only', help='Whether to compute indirect effect for heads at only the final token position, or for all token classes',
+        required=False, type=bool, default=True)
     parser.add_argument('--prefixes', help='Prompt template prefixes to be used', type=json.loads, required=False, default={"input":"Q:", "output":"A:", "instructions":""})
     parser.add_argument('--separators', help='Prompt template separators to be used', type=json.loads, required=False, default={"input":"\n", "output":"\n\n", "instructions":""})    
-        
+    parser.add_argument('--act_source', help='Compute indirect effect using attention head (fv) or MLP output (mlp_O) activations', 
+        type=str, required=False, default="fv")
     args = parser.parse_args()
 
     dataset_name = args.dataset_name
@@ -181,7 +235,7 @@ if __name__ == "__main__":
     last_token_only = args.last_token_only
     prefixes = args.prefixes
     separators = args.separators
-
+    act_source = args.act_source
 
     # Load Model & Tokenizer
     torch.set_grad_enabled(False)
@@ -193,33 +247,52 @@ if __name__ == "__main__":
     # Load the dataset
     print("Loading Dataset")
     dataset = load_dataset(dataset_name, root_data_dir=root_data_dir, test_size=test_split, seed=seed)
-    
 
     if not os.path.exists(save_path_root):
         os.makedirs(save_path_root)
 
     # Load or Re-Compute Mean Activations
+    act_file_suffix = f"mean_activations_{act_source}.pt"
     if mean_activations_path is not None and os.path.exists(mean_activations_path):
         mean_activations = torch.load(mean_activations_path)
-    elif mean_activations_path is None and os.path.exists(f'{save_path_root}/{dataset_name}_mean_head_activations.pt'):
-        mean_activations_path = f'{save_path_root}/{dataset_name}_mean_head_activations.pt'
-        mean_activations = torch.load(mean_activations_path)        
+    
+    elif (mean_activations_path is None 
+        and os.path.exists(f'{save_path_root}/{dataset_name}_{act_file_suffix}')
+    ):
+        mean_activations_path = f'{save_path_root}/{dataset_name}_{act_file_suffix}'
+        mean_activations = torch.load(mean_activations_path)   
+
     else:
         print("Computing Mean Activations")
-        mean_activations = get_mean_head_activations(dataset, model=model, model_config=model_config, tokenizer=tokenizer, 
-            n_icl_examples=n_shots, N_TRIALS=n_trials, prefixes=prefixes, separators=separators)
-        torch.save(mean_activations, f'{save_path_root}/{dataset_name}_mean_head_activations.pt')
+        if act_source == "fv":
+            mean_activations = get_mean_head_activations(dataset, model=model, 
+                model_config=model_config, tokenizer=tokenizer, 
+                n_icl_examples=n_shots, N_TRIALS=n_trials, prefixes=prefixes, 
+                separators=separators) # shape: 'n_layers n_heads n_filtered_tokens d_head'
+    
+        elif act_source == "mlp_O":
+            print("Mean MLP Output Activations")
+            mean_activations = get_mean_mlp_O_activations(dataset, model=model, 
+                model_config=model_config, tokenizer=tokenizer, 
+                n_icl_examples=n_shots, N_TRIALS=n_trials, prefixes=prefixes, 
+                separators=separators) # shape: 'n_layers n_filtered_tokens resid_dim'
+
+        torch.save(mean_activations, f'{save_path_root}/{dataset_name}_{act_file_suffix}')
 
     print("Computing Indirect Effect")
-    indirect_effect = compute_indirect_effect(dataset, mean_activations, model=model, model_config=model_config, tokenizer=tokenizer, 
-         n_shots=n_shots, n_trials=n_trials, last_token_only=last_token_only, prefixes=prefixes, separators=separators)
-
+    indirect_effect = compute_indirect_effect(dataset, mean_activations, 
+        model=model, model_config=model_config, tokenizer=tokenizer, 
+        n_shots=n_shots, n_trials=n_trials, last_token_only=last_token_only, 
+        prefixes=prefixes, separators=separators,
+        act_source=act_source,
+    ) #shape for fv: 'n_trials n_layers n_heads', shape for mlp_O: 'n_trials n_layers'
+      
     # Write args to file
     args.save_path_root = save_path_root
     args.mean_activations_path = mean_activations_path
-    with open(f'{save_path_root}/indirect_effect_args.txt', 'w') as arg_file:
+    with open(f'{save_path_root}/indirect_effect_args_{act_source}.txt', 'w') as arg_file:
         json.dump(args.__dict__, arg_file, indent=2)
 
-    torch.save(indirect_effect, f'{save_path_root}/{dataset_name}_indirect_effect.pt')
+    torch.save(indirect_effect, f'{save_path_root}/{dataset_name}_indirect_effect_{act_source}.pt')
 
     
