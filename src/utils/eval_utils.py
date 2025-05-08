@@ -258,11 +258,24 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
         word_pairs_test = dataset['test'][j]
 
         if prefixes is not None and separators is not None:
-            prompt_data = word_pairs_to_prompt_data(word_pairs, query_target_pair = word_pairs_test, prepend_bos_token=prepend_bos, 
-                                                    shuffle_labels=shuffle_labels, prefixes=prefixes, separators=separators)
-        else:
-            prompt_data = word_pairs_to_prompt_data(word_pairs, query_target_pair = word_pairs_test, prepend_bos_token=prepend_bos, shuffle_labels=shuffle_labels)
+            if type(prefixes) == dict and type(separators) == dict:
+                prefix = prefixes
+                separator = separators
+            elif type(prefixes) == list and type(separators) == list:
+                rand_idx = np.random.choice(len(prefixes))
+                prefix = prefixes[rand_idx]
+                sep_rand_idx = np.random.choice(len(separators))
+                separator = separators[sep_rand_idx]
+            else:
+                raise ValueError("prefixes and separators should be either both list or dict")
             
+            prompt_data = word_pairs_to_prompt_data(word_pairs, query_target_pair = word_pairs_test, 
+                prepend_bos_token=prepend_bos, shuffle_labels=shuffle_labels, 
+                prefixes=prefix, separators=separator)
+        else:
+            prompt_data = word_pairs_to_prompt_data(word_pairs, query_target_pair = word_pairs_test, 
+                prepend_bos_token=prepend_bos, shuffle_labels=shuffle_labels)
+        
         # Get relevant parts of the Prompt
         query, target = prompt_data['query_target']['input'], prompt_data['query_target']['output']
         query = query[0] if isinstance(query, list) else query
@@ -273,6 +286,8 @@ def n_shot_eval(dataset, fv_vector, edit_layer: int, n_shots: int, model, model_
             target = target[0] if isinstance(target, list) else target
         
         sentence = [create_prompt(prompt_data)]
+        if j == 0:
+            print(f"Prompt for eval intervention:\n{create_prompt(prompt_data)}")
         
         # Figure out token of interest        
         target_token_id = get_answer_id(sentence[0], target, tokenizer)
@@ -376,10 +391,24 @@ def n_shot_eval_no_intervention(dataset, n_shots, model, model_config, tokenizer
             word_pairs = dataset['train'][np.random.choice(len(dataset['train']),n_shots, replace=False)]
         word_pairs_test = dataset[test_split][j]
         if prefixes is not None and separators is not None:
-            prompt_data = word_pairs_to_prompt_data(word_pairs, query_target_pair = word_pairs_test, prepend_bos_token=prepend_bos, 
-                                                    shuffle_labels=shuffle_labels, prefixes=prefixes, separators=separators)
+            if type(prefixes) == dict and type(separators) == dict:
+                prefix = prefixes
+                separator = separators
+            elif type(prefixes) == list and type(separators) == list:
+                rand_idx = np.random.choice(len(prefixes))
+                prefix = prefixes[rand_idx]
+                sep_rand_idx = np.random.choice(len(separators))
+                separator = separators[sep_rand_idx]
+            else:
+                raise ValueError("prefixes and separators should be either both list or dict")
+            
+            prompt_data = word_pairs_to_prompt_data(word_pairs, 
+                query_target_pair = word_pairs_test, prepend_bos_token=prepend_bos, 
+                shuffle_labels=shuffle_labels, prefixes=prefix, separators=separator)
         else:
-            prompt_data = word_pairs_to_prompt_data(word_pairs, query_target_pair = word_pairs_test, prepend_bos_token=prepend_bos, shuffle_labels=shuffle_labels)
+            prompt_data = word_pairs_to_prompt_data(word_pairs, 
+                query_target_pair = word_pairs_test, prepend_bos_token=prepend_bos, 
+                shuffle_labels=shuffle_labels)
             
         # Get relevant parts of the Prompt
         query, target = prompt_data['query_target']['input'], prompt_data['query_target']['output']
@@ -390,6 +419,8 @@ def n_shot_eval_no_intervention(dataset, n_shots, model, model_config, tokenizer
             target = target[0] if isinstance(target, list) else target
         
         sentence = [create_prompt(prompt_data)]
+        if j == 0: 
+            print(f"Prompt for eval no intervention:\n{sentence[0]}")
         
         # Figure out tokens of interest
         target_token_id = get_answer_id(sentence[0], target, tokenizer)

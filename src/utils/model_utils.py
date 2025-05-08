@@ -90,6 +90,7 @@ def load_gpt_model_and_tokenizer(model_name:str, device='cuda', revision=None):
                 bnb_4bit_compute_dtype=torch.float16
             )
             tokenizer = LlamaTokenizer.from_pretrained(model_name)
+            tokenizer.pad_token = tokenizer.eos_token
             model = LlamaForCausalLM.from_pretrained(
                     model_name,
                     trust_remote_code=True,
@@ -107,6 +108,7 @@ def load_gpt_model_and_tokenizer(model_name:str, device='cuda', revision=None):
 
             # If transformers version is >= 4.31, use AutoLoaders
             tokenizer = AutoTokenizer.from_pretrained(model_name)
+            tokenizer.pad_token = tokenizer.eos_token
             model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=model_dtype).to(device)
 
         MODEL_CONFIG={"n_heads":model.config.num_attention_heads,

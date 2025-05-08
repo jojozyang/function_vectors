@@ -11,7 +11,9 @@ from utils.model_utils import *
 from utils.extract_utils import *
 
 
-def activation_replacement_per_class_intervention(prompt_data, avg_activations, dummy_labels, model, model_config, tokenizer, last_token_only=True):
+def activation_replacement_per_class_intervention(
+    prompt_data, avg_activations, dummy_labels, model, 
+    model_config, tokenizer, last_token_only=True):
     """
     Experiment to determine top intervention locations through avg activation replacement. 
     Performs a systematic sweep over attention heads (layer, head) to track their causal influence on probs of key tokens.
@@ -34,7 +36,8 @@ def activation_replacement_per_class_intervention(prompt_data, avg_activations, 
     query_target_pair = prompt_data['query_target']
 
     query = query_target_pair['input']
-    token_labels, prompt_string = get_token_meta_labels(prompt_data, tokenizer, query=query, prepend_bos=model_config['prepend_bos'])
+    token_labels, prompt_string = get_token_meta_labels(
+        prompt_data, tokenizer, query=query, prepend_bos=model_config['prepend_bos'])
 
     idx_map, idx_avg = compute_duplicated_labels(token_labels, dummy_labels)
     idx_map = update_idx_map(idx_map, idx_avg)
@@ -56,9 +59,11 @@ def activation_replacement_per_class_intervention(prompt_data, avg_activations, 
     # Compute causal effect for all token classes (instead of just last token)
     else:
         token_classes = ['demonstration', 'label', 'separator', 'predictive', 'structural','end_of_example', 
-                        'query_demonstration', 'query_structural', 'query_separator', 'query_predictive']
-        token_classes_regex = ['demonstration_[\d]{1,}_token', 'demonstration_[\d]{1,}_label_token', 'separator_token', 'predictive_token', 'structural_token','end_of_example_token', 
-                            'query_demonstration_token', 'query_structural_token', 'query_separator_token', 'query_predictive_token']
+            'query_demonstration', 'query_structural', 'query_separator', 'query_predictive']
+        token_classes_regex = ['demonstration_[\d]{1,}_token', 'demonstration_[\d]{1,}_label_token', 
+            'separator_token', 'predictive_token', 'structural_token','end_of_example_token', 
+            'query_demonstration_token', 'query_structural_token', 
+            'query_separator_token', 'query_predictive_token']
     
 
     indirect_effect_storage = torch.zeros(model_config['n_layers'], model_config['n_heads'],len(token_classes))
@@ -77,20 +82,24 @@ def activation_replacement_per_class_intervention(prompt_data, avg_activations, 
                 class_token_inds = [x[0] for x in token_labels if reg_class_match.match(x[2])]
 
                 intervention_locations = [(layer, head_n, token_n) for token_n in class_token_inds]
-                intervention_fn = replace_activation_w_avg(layer_head_token_pairs=intervention_locations, avg_activations=avg_activations, 
-                                                           model=model, model_config=model_config,
-                                                           batched_input=False, idx_map=idx_map, last_token_only=last_token_only)
+                intervention_fn = replace_activation_w_avg(
+                    layer_head_token_pairs=intervention_locations, avg_activations=avg_activations, 
+                    model=model, model_config=model_config,
+                    batched_input=False, idx_map=idx_map, last_token_only=last_token_only)
                 with TraceDict(model, layers=head_hook_layer, edit_output=intervention_fn) as td:                
                     output = model(**inputs).logits[:,-1,:] # batch_size x n_tokens x vocab_size, only want last token prediction
                 
                 # TRACK probs of tokens of interest
                 intervention_probs = torch.softmax(output, dim=-1) # convert to probability distribution
-                indirect_effect_storage[layer,head_n,i] = (intervention_probs-clean_probs).index_select(1, torch.LongTensor(token_id_of_interest).to(device).squeeze()).squeeze()
+                indirect_effect_storage[layer,head_n,i] = (intervention_probs-clean_probs).index_select(
+                    1, torch.LongTensor(token_id_of_interest).to(device).squeeze()).squeeze()
 
     return indirect_effect_storage
 
 
-def compute_indirect_effect(dataset, mean_activations, model, model_config, tokenizer, n_shots=10, n_trials=25, last_token_only=True, prefixes=None, separators=None, filter_set=None):
+def compute_indirect_effect(dataset, mean_activations, model, model_config, 
+    tokenizer, n_shots=10, n_trials=25, last_token_only=True, 
+    prefixes=None, separators=None, filter_set=None):
     """
     Computes Indirect Effect of each head in the model
 
@@ -101,9 +110,9 @@ def compute_indirect_effect(dataset, mean_activations, model, model_config, toke
     model_config: contains model config information (n layers, n heads, etc.)
     tokenizer: huggingface tokenizer
     n_shots: Number of shots in each in-context prompt
+        if n_shot = 0, the base is zs prompt (for instuction) rather than random (shuffled) prompt (for ICL)
     n_trials: Number of in-context prompts to average over
     last_token_only: If True, only computes Indirect Effect for heads at the final token position. If False, computes Indirect Effect for heads for all token classes
-
 
     Returns:
     indirect_effect: torch tensor of the indirect effect for each attention head in the model, size n_trials * n_layers * n_heads
@@ -111,9 +120,22 @@ def compute_indirect_effect(dataset, mean_activations, model, model_config, toke
     n_test_examples = 1
 
     if prefixes is not None and separators is not None:
-        dummy_gt_labels = get_dummy_token_labels(n_shots, tokenizer=tokenizer, prefixes=prefixes, separators=separators, model_config=model_config)
+        if type(prefixes) == dict and type(separators) == dict:
+            prefix = prefixes
+            separator = separators
+        elif type(prefixes) == list and type(separators) == list:
+            rand_idx = np.random.choice(len(prefixes))
+            prefix = prefixes[rand_idx]
+            sep_rand_idx = np.random.choice(len(separators))
+            separator = separators[sep_rand_idx]
+        else:
+            raise ValueError("prefixes and separators should be either both list or dict")
+        
+        dummy_gt_labels = get_dummy_token_labels(n_shots, tokenizer=tokenizer, 
+            prefixes=prefix, separators=separator, model_config=model_config)
     else:
-        dummy_gt_labels = get_dummy_token_labels(n_shots, tokenizer=tokenizer, model_config=model_config)
+        dummy_gt_labels = get_dummy_token_labels(n_shots, tokenizer=tokenizer, 
+            model_config=model_config)
 
     # If the model already prepends a bos token by default, we don't want to add one
     prepend_bos = False if model_config['prepend_bos'] else True
@@ -130,17 +152,32 @@ def compute_indirect_effect(dataset, mean_activations, model, model_config, toke
         word_pairs = dataset['train'][np.random.choice(len(dataset['train']),n_shots, replace=False)]
         word_pairs_test = dataset['valid'][np.random.choice(filter_set,n_test_examples, replace=False)]
         if prefixes is not None and separators is not None:
-            prompt_data_random = word_pairs_to_prompt_data(word_pairs, query_target_pair=word_pairs_test, shuffle_labels=True, 
-                                                           prepend_bos_token=prepend_bos, prefixes=prefixes, separators=separators)
+            if type(prefixes) == dict and type(separators) == dict:
+                prefix = prefixes
+                separator = separators
+            elif type(prefixes) == list and type(separators) == list:
+                prefix = prefixes[rand_idx]
+                separator = separators[sep_rand_idx]
+            else:
+                raise ValueError("prefixes and separators should be either both list or dict")
+            
+            prompt_data_random = word_pairs_to_prompt_data( # if n_shot = 0, this is zs prompt (for instuction) rather than random prompt (for ICL)
+                word_pairs, query_target_pair=word_pairs_test, shuffle_labels=True, 
+                prepend_bos_token=prepend_bos, prefixes=prefix, separators=separator)
         else:
-            prompt_data_random = word_pairs_to_prompt_data(word_pairs, query_target_pair=word_pairs_test, 
-                                                           shuffle_labels=True, prepend_bos_token=prepend_bos)
+            prompt_data_random = word_pairs_to_prompt_data(
+                word_pairs, query_target_pair=word_pairs_test, 
+                shuffle_labels=True, prepend_bos_token=prepend_bos)
+        sentence = [create_prompt(prompt_data_random)]
+        if i == 0: 
+            print(f"Prompt for computing indirect effect:\n{sentence[0]}")
         
-        ind_effects = activation_replacement_per_class_intervention(prompt_data=prompt_data_random, 
-                                                                    avg_activations = mean_activations, 
-                                                                    dummy_labels=dummy_gt_labels, 
-                                                                    model=model, model_config=model_config, tokenizer=tokenizer, 
-                                                                    last_token_only=last_token_only)
+        ind_effects = activation_replacement_per_class_intervention(
+            prompt_data=prompt_data_random, 
+            avg_activations = mean_activations, 
+            dummy_labels=dummy_gt_labels, 
+            model=model, model_config=model_config, tokenizer=tokenizer, 
+            last_token_only=last_token_only)
         indirect_effect[i] = ind_effects.squeeze()
 
     return indirect_effect

@@ -51,17 +51,27 @@ def replace_activation_w_avg(layer_head_token_pairs, avg_activations, model, mod
             # Patch activations from avg activations into baseline sentences (i.e. n_head baseline sentences being modified in this case)
                 for i in range(model_config['n_heads']):
                     layer, head_n, token_n = layer_head_token_pairs[i]
-                    inputs[i, token_n, head_n] = avg_activations[layer, head_n, idx_map[token_n]]
+                    if avg_activations.dim() == 4:  # (Layers, Heads, Tokens, head_dim)
+                        inputs[i, token_n, head_n] = avg_activations[layer, head_n, idx_map[token_n]]
+                    else: #'n_layers n_heads head_dim'
+                        inputs[i, token_n, head_n] = avg_activations[layer, head_n]
+
             elif last_token_only:
             # Patch activations only at the last token for interventions like
                 for (layer,head_n,token_n) in layer_head_token_pairs:
                     if layer == current_layer:
-                        inputs[-1,-1,head_n] = avg_activations[layer,head_n,idx_map[token_n]]
+                        if avg_activations.dim() == 4:
+                            inputs[-1,-1,head_n] = avg_activations[layer,head_n,idx_map[token_n]]
+                        else: #'n_layers n_heads head_dim'
+                            inputs[-1,-1,head_n] = avg_activations[layer,head_n]
             else:
             # Patch activations into baseline sentence found at index, -1 of the batch (targeted & multi-token patching)
                 for (layer, head_n, token_n) in layer_head_token_pairs:
                     if layer == current_layer:
-                        inputs[-1, token_n, head_n] = avg_activations[layer,head_n,idx_map[token_n]]
+                        if avg_activations.dim() == 4:
+                            inputs[-1, token_n, head_n] = avg_activations[layer,head_n,idx_map[token_n]]
+                        else: #'n_layers n_heads head_dim'
+                            inputs[-1, token_n, head_n] = avg_activations[layer,head_n]
             
             inputs = inputs.view(*original_shape)
             proj_module = get_module(model, layer_name)
